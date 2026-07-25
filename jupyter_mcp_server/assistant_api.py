@@ -64,6 +64,9 @@ app = FastAPI(
         "implementations.  A notebook is identified by a deterministic "
         "nb_<base64> ID derived from its Jupyter-root-relative filepath."
     ),
+    servers=[
+        {"url": os.getenv("ASSISTANT_API_SERVER_URL", "https://jupyter-assistant.dzackgarza.com")},
+    ],
 )
 
 runtime = AssistantRuntime()
@@ -148,6 +151,86 @@ class ListFilesQuery(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Response models — explicit so the OpenAPI schema has `properties`
+# (GPT Action validator rejects object schemas without properties).
+# ---------------------------------------------------------------------------
+
+
+class HealthResponse(BaseModel):
+    ok: bool
+    status: str
+    jupyter_url: str | None = None
+    error: str | None = None
+
+
+class UseNotebookResponse(BaseModel):
+    ok: bool
+    notebook_id: str
+    notebook_path: str
+    kernel_id: str | None = None
+    mode: str
+
+
+class NotebookResultResponse(BaseModel):
+    ok: bool
+    notebook_id: str
+    notebook_path: str
+    result: Any = None
+
+
+class CellResultResponse(BaseModel):
+    ok: bool
+    notebook_id: str
+    notebook_path: str
+    cell_index: int
+    result: Any = None
+
+
+class CellOutputsResponse(BaseModel):
+    ok: bool
+    notebook_id: str
+    notebook_path: str
+    cell_index: int
+    outputs: Any = None
+
+
+class ExecuteOutputsResponse(BaseModel):
+    ok: bool
+    notebook_id: str
+    notebook_path: str
+    outputs: Any = None
+
+
+class DeleteCellResponse(BaseModel):
+    ok: bool
+    notebook_id: str
+    notebook_path: str
+    deleted_indices: list[int]
+    result: Any = None
+
+
+class MoveCellResponse(BaseModel):
+    ok: bool
+    notebook_id: str
+    notebook_path: str
+    source_index: int
+    target_index: int
+    result: Any = None
+
+
+class GenericResultResponse(BaseModel):
+    ok: bool
+    result: Any = None
+
+
+class RestartResponse(BaseModel):
+    ok: bool
+    notebook_id: str
+    notebook_path: str
+    result: Any = None
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -182,7 +265,7 @@ def _envelope(notebook_id: str, path: str, **extra: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/health", operation_id="health")
+@app.get("/health", operation_id="health", response_model=HealthResponse)
 async def health() -> dict[str, Any]:
     """Report API and Jupyter server readiness."""
     try:
@@ -194,7 +277,7 @@ async def health() -> dict[str, Any]:
         return {"ok": False, "status": "unhealthy", "error": str(exc)}
 
 
-@app.get("/v1/files", operation_id="list_files")
+@app.get("/v1/files", operation_id="list_files", response_model=GenericResultResponse)
 async def list_files(
     path: str = "",
     max_depth: int = 1,
@@ -216,7 +299,7 @@ async def list_files(
     return {"ok": True, "result": result}
 
 
-@app.get("/v1/kernels", operation_id="list_kernels")
+@app.get("/v1/kernels", operation_id="list_kernels", response_model=GenericResultResponse)
 async def list_kernels() -> Any:
     """List active kernels on the Jupyter server."""
     result = await safe_notebook_operation(
@@ -230,7 +313,9 @@ async def list_kernels() -> Any:
     return {"ok": True, "result": result}
 
 
-@app.get("/v1/notebooks/managed", operation_id="list_notebooks")
+@app.get(
+    "/v1/notebooks/managed", operation_id="list_notebooks", response_model=GenericResultResponse
+)
 async def list_notebooks() -> Any:
     """List notebooks currently registered in the in-process NotebookManager.
 
@@ -249,6 +334,7 @@ async def list_notebooks() -> Any:
 @app.post(
     "/v1/notebooks/use",
     operation_id="use_notebook",
+    response_model=UseNotebookResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def use_notebook(request: UseNotebookRequest) -> dict[str, Any]:
@@ -281,6 +367,7 @@ async def use_notebook(request: UseNotebookRequest) -> dict[str, Any]:
 @app.get(
     "/v1/notebooks/{notebook_id}",
     operation_id="read_notebook",
+    response_model=NotebookResultResponse,
 )
 async def read_notebook(
     notebook_id: str,
@@ -309,6 +396,7 @@ async def read_notebook(
 @app.get(
     "/v1/notebooks/{notebook_id}/cells/{cell_index}",
     operation_id="read_cell",
+    response_model=CellResultResponse,
 )
 async def read_cell(
     notebook_id: str,
@@ -339,6 +427,7 @@ async def read_cell(
 @app.post(
     "/v1/notebooks/{notebook_id}/cells",
     operation_id="insert_cell",
+    response_model=CellResultResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def insert_cell(
@@ -365,6 +454,7 @@ async def insert_cell(
 @app.put(
     "/v1/notebooks/{notebook_id}/cells/{cell_index}",
     operation_id="overwrite_cell_source",
+    response_model=CellResultResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def overwrite_cell_source(
@@ -391,6 +481,7 @@ async def overwrite_cell_source(
 @app.patch(
     "/v1/notebooks/{notebook_id}/cells/{cell_index}",
     operation_id="edit_cell_source",
+    response_model=CellResultResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def edit_cell_source(
@@ -419,6 +510,7 @@ async def edit_cell_source(
 @app.delete(
     "/v1/notebooks/{notebook_id}/cells",
     operation_id="delete_cell",
+    response_model=DeleteCellResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def delete_cell(
@@ -444,6 +536,7 @@ async def delete_cell(
 @app.post(
     "/v1/notebooks/{notebook_id}/cells/move",
     operation_id="move_cell",
+    response_model=MoveCellResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def move_cell(
@@ -475,6 +568,7 @@ async def move_cell(
 @app.post(
     "/v1/notebooks/{notebook_id}/cells/{cell_index}/clear-output",
     operation_id="clear_cell_output",
+    response_model=CellResultResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def clear_cell_output(
@@ -500,6 +594,7 @@ async def clear_cell_output(
 @app.post(
     "/v1/notebooks/{notebook_id}/cells/{cell_index}/execute",
     operation_id="execute_cell",
+    response_model=CellOutputsResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def execute_cell(
@@ -529,6 +624,7 @@ async def execute_cell(
 @app.post(
     "/v1/notebooks/{notebook_id}/cells/insert-and-execute",
     operation_id="insert_execute_code_cell",
+    response_model=CellOutputsResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def insert_execute_code_cell(
@@ -579,6 +675,7 @@ async def insert_execute_code_cell(
 @app.post(
     "/v1/notebooks/{notebook_id}/execute-code",
     operation_id="execute_code",
+    response_model=ExecuteOutputsResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def execute_code(
@@ -612,6 +709,7 @@ async def execute_code(
 @app.post(
     "/v1/notebooks/{notebook_id}/restart",
     operation_id="restart_notebook",
+    response_model=RestartResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def restart_notebook(notebook_id: str) -> dict[str, Any]:
