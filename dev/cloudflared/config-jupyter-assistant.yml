@@ -1,0 +1,21 @@
+tunnel: f12f0463-0152-489d-a028-cb7ae016f188
+credentials-file: /home/dzack/.cloudflared/f12f0463-0152-489d-a028-cb7ae016f188.json
+
+# This host has no working IPv6 egress: cloudflared binds [::] for QUIC and every
+# dial fails with "sendmsg: network is unreachable", so the tunnel never registers
+# and the hostname serves Cloudflare 1033 (rendered as HTTP 530).  Force IPv4 and
+# use http2 (TCP 7844) rather than QUIC (UDP 7844).
+#
+# edge-ip-version MUST be a quoted string.  cloudflared rejects the bare int with
+# "expected string found int for edge-ip-version" and exits 1, which systemd then
+# crash-loops.
+edge-ip-version: "4"
+protocol: http2
+
+# Must match the port main() binds in jupyter_mcp_server/assistant_api.py.
+# The API has no authentication, so it binds loopback only and this tunnel is the
+# sole public path to it.
+ingress:
+  - hostname: jupyter-assistant.dzackgarza.com
+    service: http://127.0.0.1:4042
+  - service: http_status:404

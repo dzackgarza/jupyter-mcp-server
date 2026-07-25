@@ -580,3 +580,60 @@ spec uses a bare `python`, resolved from the launching process's PATH, so a
 Jupyter server started under this project's `.venv` gets an interpreter that
 cannot `import sage`; the kernel then crash-loops and the websocket handshake
 fails with an opaque 500. Run `direnv allow` once after cloning.
+
+## Deployment (systemd + Cloudflare tunnel)
+
+Three user units, vendored in `dev/systemd/`:
+
+| unit | role |
+| --- | --- |
+| `jupyter-sagemath` | the Jupyter server itself, on `:8888` |
+| `jupyter-assistant-api` | this adapter, on `127.0.0.1:4042` |
+| `jupyter-assistant-tunnel` | Cloudflare tunnel publishing the adapter |
+
+Install by absolute path so `~/.config/systemd/user/` holds symlinks into the repo,
+and edits take effect on `daemon-reload`:
+
+```bash
+systemctl --user enable --now \
+  "$PWD/dev/systemd/jupyter-assistant-api.service" \
+  "$PWD/dev/systemd/jupyter-assistant-tunnel.service"
+```
+
+### Port contract
+
+`127.0.0.1:4042` appears in three places that must agree: `main()` in
+`jupyter_mcp_server/assistant_api.py`, the `ingress` block in
+`dev/cloudflared/config-jupyter-assistant.yml`, and this document. The API has no
+authentication, so it binds loopback only — the tunnel is the sole public path.
+
+### Tunnel config
+
+`dev/cloudflared/config-jupyter-assistant.yml` is vendored; only the credentials
+JSON stays in `~/.cloudflared/`, referenced by path, so no secret is in the repo.
+
+Two settings there are load-bearing and non-obvious:
+
+- **`edge-ip-version: "4"`** — this host has no working IPv6 egress. Without it,
+  `cloudflared` binds `[::]` for QUIC and every dial fails with `sendmsg: network
+  is unreachable`, the tunnel never registers, and the hostname serves Cloudflare
+  **1033** (surfacing as HTTP **530**) while the local API is perfectly healthy.
+  The value **must be quoted**: the bare int is rejected with `expected string
+  found int for edge-ip-version` and the unit crash-loops.
+- **`protocol: http2`** — uses TCP 7844 instead of QUIC over UDP 7844.
+
+### Diagnosing 530 / 1033
+
+A 530 means the origin is unreachable *from Cloudflare*, so check in this order —
+the process being up proves nothing, since `cloudflared` holds a PID while failing
+to register:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4042/health   # origin
+systemctl --user is-active jupyter-assistant-api jupyter-assistant-tunnel
+journalctl --user -u jupyter-assistant-tunnel -n 20 --no-pager          # decisive
+```
+
+Look for `Registered tunnel connection` (healthy) versus `Failed to dial a quic
+connection` (edge unreachable). Test edge reachability more than once before
+concluding a port is blocked — a single failed probe is not evidence.

@@ -4,9 +4,11 @@ After=network-online.target jupyter-assistant-api.service
 Wants=network-online.target jupyter-assistant-api.service
 
 [Service]
-# Config + credentials stay in ~/.cloudflared (not vendored — credentials-file
-# is a secret). Its ingress must point at 127.0.0.1:4042 to match main().
-ExecStart=/bin/cloudflared tunnel --config /home/dzack/.cloudflared/config-jupyter-assistant.yml run
+# The config is vendored (dev/cloudflared/) so the ingress port, IPv4 pinning, and
+# http2 protocol are versioned rather than surviving only in an untracked dotfile.
+# Only the credentials JSON stays in ~/.cloudflared — the config references it by
+# path, so no secret enters the repo.
+ExecStart=/bin/cloudflared tunnel --config %h/gitclones/jupyter-assistant-api/dev/cloudflared/config-jupyter-assistant.yml run
 Restart=always
 RestartSec=5
 
