@@ -12,7 +12,7 @@ from jupyter_server_client import JupyterServerClient
 
 from jupyter_mcp_server.models import Notebook
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 from jupyter_mcp_server.utils import (
     clean_notebook_outputs,
     get_current_notebook_context,
@@ -41,9 +41,12 @@ class InsertCellTool(BaseTool):
             ValueError: When cell_type is invalid
         """
         if cell_index < -1 or cell_index > total_cells:
-            raise IndexError(
-                f"Index {cell_index} is outside valid range [-1, {total_cells}]. "
-                f"Use -1 to append at end."
+            raise ToolError(
+                f"[insert_cell] Index {cell_index} is outside valid range [-1, {total_cells}].\n"
+                f"  Notebook has {total_cells} cells.\n"
+                f"  Suggestions:\n"
+                f"    - Use read_notebook to see all cells and their indices.\n"
+                f"    - Use -1 to append at end."
             )
 
         # Normalize -1 to append position
@@ -112,9 +115,23 @@ class InsertCellTool(BaseTool):
             ValueError: When cell_type is invalid
         """
         # Read notebook file
-        with open(notebook_path, encoding="utf-8") as f:
-            # Read as version 4 (latest) to ensure consistency and support for cell IDs
-            notebook = nbformat.read(f, as_version=4)
+        try:
+            with open(notebook_path, encoding="utf-8") as f:
+                # Read as version 4 (latest) to ensure consistency and support for cell IDs
+                notebook = nbformat.read(f, as_version=4)
+        except Exception as e:
+            raise ToolError(
+                format_tool_error(
+                    "insert_cell",
+                    f"read notebook file '{notebook_path}'",
+                    e,
+                    context={"notebook_path": notebook_path},
+                    suggestions=[
+                        "Use list_files to find the correct notebook path.",
+                        "Use use_notebook(mode='connect') to connect to an existing notebook.",
+                    ],
+                )
+            ) from e
 
         # Clean any transient fields from existing outputs (kernel protocol field not in nbformat schema)
         clean_notebook_outputs(notebook)
@@ -133,8 +150,19 @@ class InsertCellTool(BaseTool):
         notebook.cells.insert(actual_index, new_cell)
 
         # Write back to file
-        with open(notebook_path, "w", encoding="utf-8") as f:
-            nbformat.write(notebook, f)
+        try:
+            with open(notebook_path, "w", encoding="utf-8") as f:
+                nbformat.write(notebook, f)
+        except Exception as e:
+            raise ToolError(
+                format_tool_error(
+                    "insert_cell",
+                    f"write notebook file '{notebook_path}'",
+                    e,
+                    context={"notebook_path": notebook_path},
+                    suggestions=["Check file permissions and disk space."],
+                )
+            ) from e
 
         notebook = Notebook(**notebook)
 
@@ -260,7 +288,11 @@ class InsertCellTool(BaseTool):
                 notebook_manager, cell_index, cell_type, cell_source
             )
         else:
-            raise ValueError(f"Invalid mode or missing required clients: mode={mode}")
+            raise ToolError(
+                f"[insert_cell] Invalid mode or missing required clients: mode={mode}\n"
+                f"  Suggestions:\n"
+                f"    - Ensure the tool is called with a valid ServerMode."
+            )
 
         info_list = [f"Cell inserted successfully at index {actual_index} ({cell_type})!"]
         info_list.append(f"Notebook now has {new_total_cells} cells, showing surrounding cells:")

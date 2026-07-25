@@ -11,7 +11,7 @@ from jupyter_core.utils import ensure_async
 from jupyter_server_client import JupyterServerClient
 
 from jupyter_mcp_server.config import get_config
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 from jupyter_mcp_server.utils import format_TSV
 
 
@@ -43,6 +43,11 @@ def _list_files_mcp(
 
     Returns:
         List of file/directory dictionaries with keys: path, type, size, last_modified
+
+    Raises:
+        ToolError: If the root directory listing fails (sub-directory errors
+            are logged as error entries in the returned list so the agent can
+            see which subtrees were inaccessible).
     """
     if files is None:
         files = []
@@ -79,15 +84,35 @@ def _list_files_mcp(
                 _list_files_mcp(server_client, full_path, current_depth + 1, files, max_depth)
 
     except Exception as e:
-        # If we can't access a directory, add an error entry
-        files.append(
-            {
-                "path": current_path or "root",
-                "type": "error",
-                "size": "",
-                "last_modified": f"Error: {e!s}",
-            }
-        )
+        if current_depth == 0:
+            # Root directory failed — this is a hard error, not a graceful skip.
+            raise ToolError(
+                format_tool_error(
+                    "list_files",
+                    f"list directory contents at '{current_path or 'root'}'",
+                    e,
+                    context={
+                        "server_url": getattr(server_client, "base_url", "unknown"),
+                        "mode": "MCP_SERVER (HTTP)",
+                    },
+                    suggestions=[
+                        "Check that the Jupyter server is running and accessible.",
+                        "Verify the server token is correct.",
+                        "Try list_files(path='') to list the root directory.",
+                    ],
+                )
+            ) from e
+        else:
+            # Sub-directory failed — record the error so the agent knows,
+            # but continue listing other directories.
+            files.append(
+                {
+                    "path": current_path,
+                    "type": "error",
+                    "size": "",
+                    "last_modified": f"Error accessing directory: {type(e).__name__}: {e}",
+                }
+            )
 
     return files
 
@@ -105,6 +130,9 @@ async def _list_files_local(
 
     Returns:
         List of file/directory dictionaries
+
+    Raises:
+        ToolError: If the root directory listing fails.
     """
     all_files = []
 
@@ -148,14 +176,50 @@ async def _list_files_local(
             # Recursively list subdirectories only if we haven't reached max_depth
             # max_depth=0 means no recursion (list current directory only)
             if item_type == "directory" and current_depth < max_depth:
-                subfiles = await _list_files_local(
-                    contents_manager, item_path, max_depth, current_depth + 1
-                )
-                all_files.extend(subfiles)
+                try:
+                    subfiles = await _list_files_local(
+                        contents_manager, item_path, max_depth, current_depth + 1
+                    )
+                    all_files.extend(subfiles)
+                except ToolError:
+                    # Sub-directory failed — record the error so the agent knows
+                    all_files.append(
+                        {
+                            "path": item_path,
+                            "type": "error",
+                            "size": "",
+                            "last_modified": f"Error: could not list subdirectory '{item_path}'",
+                        }
+                    )
 
-    except Exception:
-        # Directory not accessible or doesn't exist
-        pass
+    except ToolError:
+        raise  # Already enriched
+    except Exception as e:
+        if current_depth == 0:
+            # Root directory failed — hard error.
+            raise ToolError(
+                format_tool_error(
+                    "list_files",
+                    f"list directory contents at '{path or 'root'}'",
+                    e,
+                    context={"mode": "JUPYTER_SERVER (local)"},
+                    suggestions=[
+                        "Check that the Jupyter server's contents manager is working.",
+                        f"Verify the path '{path or 'root'}' exists in the server root directory.",
+                        "Try list_files(path='') to list the root directory.",
+                    ],
+                )
+            ) from e
+        else:
+            # Sub-directory — record and continue.
+            all_files.append(
+                {
+                    "path": path,
+                    "type": "error",
+                    "size": "",
+                    "last_modified": f"Error: {type(e).__name__}: {e}",
+                }
+            )
 
     return all_files
 
@@ -196,6 +260,9 @@ class ListFilesTool(BaseTool):
         Returns:
             Tab-separated table with columns: Path, Type, Size, Last_Modified
             Includes pagination info header.
+
+        Raises:
+            ToolError: If the directory listing fails.
         """
         # Get all files based on mode
         if mode == ServerMode.JUPYTER_SERVER and contents_manager is not None:
@@ -209,7 +276,13 @@ class ListFilesTool(BaseTool):
             )
             all_files = _list_files_mcp(server_client, path, 0, None, max_depth)
         else:
-            raise ValueError(f"Invalid mode or missing required clients: mode={mode}")
+            raise ToolError(
+                f"[list_files] Cannot list files: invalid mode or missing required clients.\n"
+                f"  mode={mode}, contents_manager={'provided' if contents_manager else 'None'}\n"
+                f"  Suggestions:\n"
+                f"    - Ensure a Jupyter server is connected (use connect_to_jupyter first).\n"
+                f"    - Check the server mode configuration."
+            )
 
         if not all_files:
             return f"No files found in path '{path or 'root'}'"
@@ -224,8 +297,11 @@ class ListFilesTool(BaseTool):
             try:
                 filtered_files = [f for f in all_files if fnmatch.fnmatch(f["path"], pattern)]
                 all_files = filtered_files
-            except Exception:
-                result += f"[WARNING] Invalid glob pattern '{pattern}', skipping pattern filter. \n"
+            except Exception as e:
+                result += (
+                    f"[WARNING] Invalid glob pattern '{pattern}': {type(e).__name__}: {e}. "
+                    f"Returning unfiltered results.\n"
+                )
 
         # Calculate pagination
         total_files = len(all_files)

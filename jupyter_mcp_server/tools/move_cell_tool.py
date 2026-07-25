@@ -12,7 +12,7 @@ from jupyter_server_client import JupyterServerClient
 
 from jupyter_mcp_server.models import Notebook
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 from jupyter_mcp_server.utils import (
     clean_notebook_outputs,
     get_current_notebook_context,
@@ -35,16 +35,24 @@ class MoveCellTool(BaseTool):
             IndexError: When source_index or target_index is out of range
         """
         if total_cells == 0:
-            raise IndexError("Notebook has no cells.")
+            raise ToolError(
+                "[move_cell] Notebook has no cells.\n"
+                "  Suggestions:\n"
+                "    - Use insert_cell to add cells first."
+            )
         if source_index < 0 or source_index >= total_cells:
-            raise IndexError(
-                f"Source index {source_index} is out of range. "
-                f"Notebook has {total_cells} cells (valid: 0-{total_cells - 1})."
+            raise ToolError(
+                f"[move_cell] Source index {source_index} is out of range.\n"
+                f"  Notebook has {total_cells} cells (valid: 0 to {total_cells - 1}).\n"
+                f"  Suggestions:\n"
+                f"    - Use read_notebook to see all cells and their indices."
             )
         if target_index < 0 or target_index >= total_cells:
-            raise IndexError(
-                f"Target index {target_index} is out of range. "
-                f"Notebook has {total_cells} cells (valid: 0-{total_cells - 1})."
+            raise ToolError(
+                f"[move_cell] Target index {target_index} is out of range.\n"
+                f"  Notebook has {total_cells} cells (valid: 0 to {total_cells - 1}).\n"
+                f"  Suggestions:\n"
+                f"    - Ensure target index is within the valid range."
             )
 
     @staticmethod
@@ -110,8 +118,18 @@ class MoveCellTool(BaseTool):
         Returns:
             Tuple of (notebook, moved_cell_info)
         """
-        with open(notebook_path, encoding="utf-8") as f:
-            notebook = nbformat.read(f, as_version=4)
+        try:
+            with open(notebook_path, encoding="utf-8") as f:
+                notebook = nbformat.read(f, as_version=4)
+        except Exception as e:
+            raise ToolError(
+                format_tool_error(
+                    "move_cell",
+                    f"read notebook file '{notebook_path}'",
+                    e,
+                    context={"notebook_path": notebook_path},
+                )
+            ) from e
 
         clean_notebook_outputs(notebook)
         self._validate_move(source_index, target_index, len(notebook.cells))
@@ -126,8 +144,18 @@ class MoveCellTool(BaseTool):
 
         if source_index != target_index:
             notebook.cells = self._apply_move(notebook.cells, source_index, target_index)
-            with open(notebook_path, "w", encoding="utf-8") as f:
-                nbformat.write(notebook, f)
+            try:
+                with open(notebook_path, "w", encoding="utf-8") as f:
+                    nbformat.write(notebook, f)
+            except Exception as e:
+                raise ToolError(
+                    format_tool_error(
+                        "move_cell",
+                        f"write notebook file '{notebook_path}'",
+                        e,
+                        context={"notebook_path": notebook_path},
+                    )
+                ) from e
 
         return Notebook(**notebook), cell_info
 
@@ -208,7 +236,11 @@ class MoveCellTool(BaseTool):
                 notebook_manager, source_index, target_index
             )
         else:
-            raise ValueError(f"Invalid mode or missing required clients: mode={mode}")
+            raise ToolError(
+                f"[move_cell] Invalid mode or missing required clients: mode={mode}\n"
+                f"  Suggestions:\n"
+                f"    - Ensure the tool is called with a valid ServerMode."
+            )
 
         info_list = [
             f"Cell moved successfully from index {source_index} to {target_index} "

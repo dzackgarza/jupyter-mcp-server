@@ -7,7 +7,7 @@
 from typing import Any
 
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 from jupyter_mcp_server.utils import format_TSV
 
 
@@ -38,7 +38,7 @@ class ListNotebooksTool(BaseTool):
             TSV formatted table with managed notebook information
         """
         if notebook_manager is None:
-            return "No notebook manager available."
+            raise ToolError("[list_notebooks] No notebook manager available.")
 
         # Get all managed notebooks
         managed_notebooks = notebook_manager.list_all_notebooks()

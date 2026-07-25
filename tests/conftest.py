@@ -72,12 +72,10 @@ def _start_server(
     # Use DEVNULL to prevent any pipe blocking issues.
     # When stderr_file is set, capture stderr for diagnostics instead.
     stderr_fh = None
-    if stderr_file:
-        stderr_fh = open(stderr_file, "w")
     p_serv = subprocess.Popen(
         command,
-        stdout=subprocess.DEVNULL,
-        stderr=stderr_fh or subprocess.DEVNULL,
+        stdout=None,
+        stderr=None,
         env=env,
     )
     _log_prefix = f"{_log_prefix} [{p_serv.pid}]"

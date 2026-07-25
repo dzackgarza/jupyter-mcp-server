@@ -345,12 +345,38 @@ class MCPSSEHandler(JupyterHandler):
                                         "isError": True,
                                     }
                         except Exception as exec_error:
-                            logger.error(f"Error executing {tool_name}: {exec_error}")
+                            # Enrich the error message with exception type and any
+                            # HTTP context so the MCP client/agent can diagnose.
+                            exc_type = type(exec_error).__name__
+                            exc_module = type(exec_error).__module__ or ""
+                            if exc_module and exc_module != "builtins":
+                                qualified = f"{exc_module}.{exc_type}"
+                            else:
+                                qualified = exc_type
+                            parts = [f"Error executing tool '{tool_name}': {qualified}: {exec_error}"]
+                            # aiohttp.ClientResponseError carries .status / .request_info.url
+                            status = getattr(exec_error, "status", None)
+                            req_info = getattr(exec_error, "request_info", None)
+                            if status is not None:
+                                parts.append(f"HTTP status: {status}")
+                            if req_info is not None:
+                                parts.append(f"URL: {getattr(req_info, 'url', 'unknown')}")
+                            # Also handle requests-style attributes
+                            if status is None and hasattr(exec_error, "status_code"):
+                                parts.append(f"HTTP status: {exec_error.status_code}")
+                            if req_info is None and hasattr(exec_error, "url"):
+                                parts.append(f"URL: {exec_error.url}")
+                            parts.append("Suggestions:")
+                            parts.append("  - Check that the Jupyter server is running and accessible.")
+                            parts.append("  - Verify the server token is correct.")
+                            parts.append("  - Use list_files or list_kernels to check server state.")
+                            error_text = "\n".join(parts)
+                            logger.error(f"Error executing {tool_name}: {exec_error}", exc_info=True)
                             result_dict = {
                                 "content": [
                                     {
                                         "type": "text",
-                                        "text": f"Failed to execute tool: {exec_error!s}",
+                                        "text": error_text,
                                     }
                                 ],
                                 "isError": True,
@@ -360,7 +386,25 @@ class MCPSSEHandler(JupyterHandler):
                         logger.info(
                             f"Routing {tool_name} to FastMCP (not in jupyter_mcp_tools cache)"
                         )
-                        result = await mcp.call_tool(tool_name, tool_arguments)
+                        try:
+                            result = await mcp.call_tool(tool_name, tool_arguments)
+                        except Exception as exec_error:
+                            exc_type = type(exec_error).__name__
+                            exc_module = type(exec_error).__module__ or ""
+                            if exc_module and exc_module != "builtins":
+                                qualified = f"{exc_module}.{exc_type}"
+                            else:
+                                qualified = exc_type
+                            error_text = f"Error executing tool '{tool_name}': {qualified}: {exec_error}"
+                            logger.error(error_text, exc_info=True)
+                            result_dict = {
+                                "content": [{"type": "text", "text": error_text}],
+                                "isError": True,
+                            }
+                            # Skip the rest of the parsing since we already have result_dict
+                            response = {"jsonrpc": "2.0", "id": request_id, "result": result_dict}
+                            self.finish(response)
+                            return
 
                         # Handle tuple results from FastMCP
                         if isinstance(result, tuple) and len(result) >= 1:
@@ -427,11 +471,28 @@ class MCPSSEHandler(JupyterHandler):
 
                     response = {"jsonrpc": "2.0", "id": request_id, "result": result_dict}
                 except Exception as e:
+                    exc_type = type(e).__name__
+                    exc_module = type(e).__module__ or ""
+                    if exc_module and exc_module != "builtins":
+                        qualified = f"{exc_module}.{exc_type}"
+                    else:
+                        qualified = exc_type
+                    parts = [f"Internal error calling tool '{tool_name}': {qualified}: {e}"]
+                    status = getattr(e, "status", None) or getattr(e, "status_code", None)
+                    if status is not None:
+                        parts.append(f"HTTP status: {status}")
+                    url = getattr(e, "url", None)
+                    req_info = getattr(e, "request_info", None)
+                    if url is not None:
+                        parts.append(f"URL: {url}")
+                    elif req_info is not None:
+                        parts.append(f"URL: {getattr(req_info, 'url', 'unknown')}")
+                    error_msg = "\n".join(parts)
                     logger.error(f"Error calling tool: {e}", exc_info=True)
                     response = {
                         "jsonrpc": "2.0",
                         "id": request_id,
-                        "error": {"code": -32603, "message": f"Internal error calling tool: {e!s}"},
+                        "error": {"code": -32603, "message": error_msg},
                     }
             elif method == "prompts/list":
                 # List available prompts - return empty list if no prompts defined

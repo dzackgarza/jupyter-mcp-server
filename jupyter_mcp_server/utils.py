@@ -638,37 +638,109 @@ async def wait_for_kernel_idle(kernel, max_wait_seconds=60):
         await asyncio.sleep(1)
 
 
-async def safe_notebook_operation(operation_func, max_retries=3):
-    """Safely execute notebook operations with connection recovery."""
+async def wait_for_kernel_ready(kernel, max_wait_seconds=10):
+    """Wait for the kernel websocket connection to be ready."""
     from jupyter_mcp_server.log import logger
 
+    start_time = time.time()
+    while True:
+        try:
+            # Check if connection_ready is set on the underlying client
+            manager = getattr(kernel, "_manager", None)
+            client = getattr(manager, "client", None)
+            connection_ready = getattr(client, "connection_ready", None)
+            if connection_ready and connection_ready.is_set():
+                break
+        except Exception:
+            pass
+
+        elapsed = time.time() - start_time
+        if elapsed > max_wait_seconds:
+            logger.warning(f"Kernel connection not ready after {max_wait_seconds}s, proceeding anyway")
+            break
+        await asyncio.sleep(0.5)
+async def safe_notebook_operation(operation_func, max_retries=3):
+    """Safely execute notebook operations with connection recovery.
+
+    Retries on WebSocket / connection-closed errors up to *max_retries* times
+    with increasing delay.  Non-connection errors are re-raised immediately
+    with enriched context so the MCP client receives an actionable message.
+    """
+    from jupyter_mcp_server.log import logger
+
+    # Import connection-error types once; any that are absent at runtime
+    # (because the dependency is not installed) are replaced with a
+    # sentinel that will never match isinstance.
+    _NeverMatch: type = type("_NeverMatch", (BaseException,), {})
+    try:
+        from websockets.exceptions import ConnectionClosed as WsConnectionClosed
+    except ImportError:
+        WsConnectionClosed = _NeverMatch  # type: ignore[misc,assignment]
+    try:
+        from jupyter_nbmodel_client import WebSocketClosedError as NbWsClosedError
+    except (ImportError, AttributeError):
+        NbWsClosedError = _NeverMatch  # type: ignore[misc,assignment]
+
+    def _is_connection_error(exc: BaseException) -> bool:
+        """Return True if *exc* is a retryable connection-closed error."""
+        # Prefer isinstance over str-matching: it is locale-independent,
+        # survives exception renames, and correctly identifies subclasses.
+        if isinstance(exc, (WsConnectionClosed, NbWsClosedError, ConnectionResetError)):
+            return True
+        if isinstance(exc, OSError) and "connection" in str(exc).lower():
+            return True
+        # Last-resort string match for exception types we cannot import
+        # (e.g. third-party libraries that wrap connection errors).
+        error_msg = str(exc).lower()
+        return any(
+            phrase in error_msg
+            for phrase in [
+                "connection is already closed",
+                "connection closed",
+                "websocket is closed",
+                "connection was lost",
+            ]
+        )
+
+    last_error: Exception | None = None
     for attempt in range(max_retries):
         try:
             return await operation_func()
         except Exception as e:
-            error_msg = str(e).lower()
-            if any(
-                err in error_msg
-                for err in [
-                    "websocketclosederror",
-                    "connection is already closed",
-                    "connection closed",
-                ]
-            ):
+            last_error = e
+            if _is_connection_error(e):
                 if attempt < max_retries - 1:
                     logger.warning(
-                        f"Connection lost, retrying... (attempt {attempt + 1}/{max_retries})"
+                        "Connection lost (attempt %d/%d): %s.%s: %s — retrying in %ds",
+                        attempt + 1,
+                        max_retries,
+                        type(e).__module__,
+                        type(e).__name__,
+                        e,
+                        1 + attempt,
                     )
-                    await asyncio.sleep(1 + attempt)  # Increasing delay
+                    await asyncio.sleep(1 + attempt)
                     continue
                 else:
-                    logger.error(f"Failed after {max_retries} attempts: {e}")
-                    raise Exception(f"Connection failed after {max_retries} retries: {e}")
+                    logger.error("Connection failed after %d attempts: %s", max_retries, e)
+                    raise Exception(
+                        f"Connection to notebook server failed after {max_retries} retries.\n"
+                        f"  Last error: {type(e).__module__}.{type(e).__name__}: {e}\n"
+                        f"  Suggestions:\n"
+                        f"    - Check that the Jupyter server is still running.\n"
+                        f"    - Try reconnecting with use_notebook(mode='connect').\n"
+                        f"    - Check server logs for connection limit or timeout issues."
+                    ) from e
             else:
-                # Non-connection error, don't retry
-                raise e
+                # Non-connection error — do not retry.  Re-raise as-is so
+                # the tool-layer ToolError (if any) propagates with its
+                # rich message intact.
+                raise
 
-    raise Exception("Unexpected error in retry logic")
+    # Should be unreachable, but be defensive.
+    raise Exception(
+        f"Unexpected state in safe_notebook_operation retry logic.  Last error: {last_error}"
+    )
 
 
 ###############################################################################

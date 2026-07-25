@@ -12,7 +12,7 @@ import nbformat
 from jupyter_server_client import JupyterServerClient
 
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 from jupyter_mcp_server.utils import (
     clean_notebook_outputs,
     get_current_notebook_context,
@@ -24,23 +24,30 @@ class EditCellSourceTool(BaseTool):
     """Tool to perform surgical string find-and-replace within a cell's source."""
 
     @staticmethod
-    def _validate_edit(source: str, old_string: str, new_string: str, replace_all: bool) -> None:
+    def _validate_edit(source: str, old_string: str, new_string: str, replace_all: bool, cell_index: int) -> None:
         """Validate edit parameters before applying.
 
         Raises:
-            ValueError: If old_string is empty, not found, or ambiguous (multiple
+            ToolError: If old_string is empty, not found, or ambiguous (multiple
                 matches without replace_all).
         """
         if not old_string:
-            raise ValueError("old_string must not be empty")
+            raise ToolError(f"[edit_cell_source] old_string must not be empty for cell {cell_index}.")
 
         count = source.count(old_string)
         if count == 0:
-            raise ValueError("old_string not found in cell source")
+            raise ToolError(
+                f"[edit_cell_source] old_string not found in cell {cell_index}.\n"
+                f"  Suggestions:\n"
+                f"    - Ensure exact whitespace and formatting matches.\n"
+                f"    - Read the cell source first."
+            )
         if count > 1 and not replace_all:
-            raise ValueError(
-                f"old_string is not unique in cell source ({count} occurrences). "
-                "Use replace_all=True to replace all occurrences."
+            raise ToolError(
+                f"[edit_cell_source] old_string is not unique in cell {cell_index} ({count} occurrences).\n"
+                f"  Suggestions:\n"
+                f"    - Use replace_all=True to replace all occurrences.\n"
+                f"    - Use a more specific (longer) old_string."
             )
 
     @staticmethod
@@ -72,13 +79,13 @@ class EditCellSourceTool(BaseTool):
         return "no changes detected"
 
     def _edit_source(
-        self, old_source: str, old_string: str, new_string: str, replace_all: bool
+        self, old_source: str, old_string: str, new_string: str, replace_all: bool, cell_index: int
     ) -> tuple[str, str]:
         """Validate, apply the edit, and return (new_source, diff).
 
-        Raises ValueError on validation failure.
+        Raises ToolError on validation failure.
         """
-        self._validate_edit(old_source, old_string, new_string, replace_all)
+        self._validate_edit(old_source, old_string, new_string, replace_all, cell_index)
         new_source = self._apply_edit(old_source, old_string, new_string, replace_all)
         diff = self._generate_diff(old_source, new_source)
         return new_source, diff
@@ -98,8 +105,11 @@ class EditCellSourceTool(BaseTool):
 
         if nb:
             if cell_index >= len(nb):
-                raise ValueError(
-                    f"Cell index {cell_index} is out of range. Notebook has {len(nb)} cells."
+                raise ToolError(
+                    f"[edit_cell_source] Cell index {cell_index} is out of range.\n"
+                    f"  Notebook has {len(nb)} cells (valid indices: 0 to {len(nb) - 1}).\n"
+                    f"  Suggestions:\n"
+                    f"    - Use read_notebook to see all cells and their indices."
                 )
 
             old_source = nb.get_cell_source(cell_index)
@@ -108,7 +118,7 @@ class EditCellSourceTool(BaseTool):
             else:
                 old_source = str(old_source)
 
-            new_source, diff = self._edit_source(old_source, old_string, new_string, replace_all)
+            new_source, diff = self._edit_source(old_source, old_string, new_string, replace_all, cell_index)
             nb.set_cell_source(cell_index, new_source)
             return diff
         else:
@@ -128,21 +138,45 @@ class EditCellSourceTool(BaseTool):
         new_string: str,
         replace_all: bool,
     ) -> str:
-        with open(notebook_path, encoding="utf-8") as f:
-            notebook = nbformat.read(f, as_version=4)
+        try:
+            with open(notebook_path, encoding="utf-8") as f:
+                notebook = nbformat.read(f, as_version=4)
+        except Exception as e:
+            raise ToolError(
+                format_tool_error(
+                    "edit_cell_source",
+                    f"read notebook file '{notebook_path}'",
+                    e,
+                    context={"notebook_path": notebook_path},
+                    suggestions=["Use list_files to check the path."],
+                )
+            ) from e
         clean_notebook_outputs(notebook)
 
         if cell_index >= len(notebook.cells):
-            raise ValueError(
-                f"Cell index {cell_index} is out of range. Notebook has {len(notebook.cells)} cells."
+            raise ToolError(
+                f"[edit_cell_source] Cell index {cell_index} is out of range.\n"
+                f"  Notebook has {len(notebook.cells)} cells (valid indices: 0 to {len(notebook.cells) - 1}).\n"
+                f"  Suggestions:\n"
+                f"    - Use read_notebook to see all cells and their indices."
             )
 
         old_source = notebook.cells[cell_index].source
-        new_source, diff = self._edit_source(old_source, old_string, new_string, replace_all)
+        new_source, diff = self._edit_source(old_source, old_string, new_string, replace_all, cell_index)
         notebook.cells[cell_index].source = new_source
 
-        with open(notebook_path, "w", encoding="utf-8") as f:
-            nbformat.write(notebook, f)
+        try:
+            with open(notebook_path, "w", encoding="utf-8") as f:
+                nbformat.write(notebook, f)
+        except Exception as e:
+            raise ToolError(
+                format_tool_error(
+                    "edit_cell_source",
+                    f"write notebook file '{notebook_path}'",
+                    e,
+                    context={"notebook_path": notebook_path},
+                )
+            ) from e
 
         return diff
 
@@ -156,7 +190,12 @@ class EditCellSourceTool(BaseTool):
     ) -> str:
         async with notebook_manager.get_current_connection() as notebook:
             if cell_index >= len(notebook):
-                raise ValueError(f"Cell index {cell_index} out of range")
+                raise ToolError(
+                    f"[edit_cell_source] Cell index {cell_index} is out of range.\n"
+                    f"  Notebook has {len(notebook)} cells (valid indices: 0 to {len(notebook) - 1}).\n"
+                    f"  Suggestions:\n"
+                    f"    - Use read_notebook to see all cells and their indices."
+                )
 
             old_source = notebook.get_cell_source(cell_index)
             if isinstance(old_source, list):
@@ -164,7 +203,7 @@ class EditCellSourceTool(BaseTool):
             else:
                 old_source = str(old_source)
 
-            new_source, diff = self._edit_source(old_source, old_string, new_string, replace_all)
+            new_source, diff = self._edit_source(old_source, old_string, new_string, replace_all, cell_index)
             notebook.set_cell_source(cell_index, new_source)
             return diff
 
@@ -230,7 +269,11 @@ class EditCellSourceTool(BaseTool):
                 replace_all,
             )
         else:
-            raise ValueError(f"Invalid mode or missing required clients: mode={mode}")
+            raise ToolError(
+                f"[edit_cell_source] Invalid mode or missing required clients: mode={mode}\n"
+                f"  Suggestions:\n"
+                f"    - Ensure the tool is called with a valid ServerMode."
+            )
 
         if not diff.strip() or diff == "no changes detected":
             return f"Cell {cell_index} edited successfully - no changes detected"

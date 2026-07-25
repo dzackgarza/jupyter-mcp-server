@@ -13,7 +13,7 @@ from mcp.types import ImageContent
 
 from jupyter_mcp_server.models import Notebook
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 from jupyter_mcp_server.utils import get_current_notebook_context, get_notebook_model
 
 
@@ -56,9 +56,11 @@ class ReadCellTool(BaseTool):
             notebook_path, _ = get_current_notebook_context(notebook_manager)
 
             if not notebook_path:
-                return [
-                    "No active notebook. Use the use_notebook tool to activate a notebook first."
-                ]
+                raise ToolError(
+                    "[read_cell] No active notebook.\n"
+                    "  Suggestions:\n"
+                    "    - Use the use_notebook tool to activate a notebook first."
+                )
 
             from jupyter_mcp_server.jupyter_extension.context import get_server_context
 
@@ -76,7 +78,7 @@ class ReadCellTool(BaseTool):
                     contents_manager.get(notebook_path, content=True, type="notebook")
                 )
                 if "content" not in model:
-                    raise ValueError(f"Could not read notebook content from {notebook_path}")
+                    raise ToolError(f"[read_cell] Could not read notebook content from {notebook_path}")
                 notebook = Notebook(**model["content"])
         elif mode == ServerMode.MCP_SERVER and notebook_manager is not None:
             # Remote mode: use WebSocket connection to Y.js document.
@@ -85,10 +87,16 @@ class ReadCellTool(BaseTool):
             async with notebook_manager.get_current_connection() as notebook_content:
                 notebook = Notebook(**notebook_content.as_dict())
         else:
-            raise ValueError(f"Invalid mode or missing required clients: mode={mode}")
+            raise ToolError(f"[read_cell] Invalid mode or missing required clients: mode={mode}")
 
         if cell_index >= len(notebook):
-            return f"Cell index {cell_index} is out of range. Notebook has {len(notebook)} cells."
+            raise ToolError(
+                f"[read_cell] Cell index {cell_index} is out of range.\n"
+                f"  Notebook has {len(notebook)} cells (valid indices: 0 to {len(notebook) - 1}).\n"
+                f"  Suggestions:\n"
+                f"    - Use read_notebook to see all cells and their indices.\n"
+                f"    - Cell indices are 0-based."
+            )
         cell = notebook[cell_index]
         info_list = []
         # add cell metadata

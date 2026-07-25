@@ -43,28 +43,28 @@ class TestEditCellSourceValidation:
 
     def test_empty_old_string_raises_error(self):
         """Empty old_string must be rejected."""
-        with pytest.raises(ValueError, match="must not be empty"):
-            self.tool._validate_edit("some source", "", "replacement", False)
+        with pytest.raises(ToolError, match="must not be empty"):
+            self.tool._validate_edit("some source", "", "replacement", False, 0)
 
     def test_old_string_not_found_raises_error(self):
         """old_string that doesn't exist in source must be rejected."""
-        with pytest.raises(ValueError, match="not found"):
-            self.tool._validate_edit("hello world", "xyz", "abc", False)
+        with pytest.raises(ToolError, match="not found"):
+            self.tool._validate_edit("hello world", "xyz", "abc", False, 0)
 
     def test_old_string_ambiguous_without_replace_all(self):
         """Multiple matches without replace_all=True must be rejected."""
-        with pytest.raises(ValueError, match="not unique"):
-            self.tool._validate_edit("aaa", "a", "b", False)
+        with pytest.raises(ToolError, match="not unique"):
+            self.tool._validate_edit("aaa", "a", "b", False, 0)
 
     def test_old_string_ambiguous_with_replace_all_passes(self):
         """Multiple matches with replace_all=True should pass validation."""
         # Should not raise
-        self.tool._validate_edit("aaa", "a", "b", True)
+        self.tool._validate_edit("aaa", "a", "b", True, 0)
 
     def test_old_string_unique_without_replace_all_passes(self):
         """Exactly one match without replace_all should pass validation."""
         # Should not raise
-        self.tool._validate_edit("hello world", "hello", "hi", False)
+        self.tool._validate_edit("hello world", "hello", "hi", False, 0)
 
 
 class TestEditCellSourceApply:
@@ -164,8 +164,8 @@ class TestEditCellSourceApply:
     def test_indentation_sensitivity_wrong_indent_not_found(self):
         """Wrong indentation should not match — spaces matter."""
         source = "    four_spaces"
-        with pytest.raises(ValueError, match="not found"):
-            self.tool._validate_edit(source, "  two_spaces", "x", False)
+        with pytest.raises(ToolError, match="not found"):
+            self.tool._validate_edit(source, "  two_spaces", "x", False, 0)
 
     # --- Boundary positions ---
 

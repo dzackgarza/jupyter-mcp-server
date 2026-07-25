@@ -12,7 +12,7 @@ import nbformat
 from jupyter_server_client import JupyterServerClient
 
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 from jupyter_mcp_server.utils import (
     clean_notebook_outputs,
     get_current_notebook_context,
@@ -65,8 +65,11 @@ class OverwriteCellSourceTool(BaseTool):
         if nb:
             # Notebook is open in collaborative mode, use YDoc
             if cell_index >= len(nb):
-                raise ValueError(
-                    f"Cell index {cell_index} is out of range. Notebook has {len(nb)} cells."
+                raise ToolError(
+                    f"[overwrite_cell_source] Cell index {cell_index} is out of range.\n"
+                    f"  Notebook has {len(nb)} cells (valid indices: 0 to {len(nb) - 1}).\n"
+                    f"  Suggestions:\n"
+                    f"    - Use read_notebook to see all cells and their indices."
                 )
 
             old_source = nb.get_cell_source(cell_index)
@@ -98,13 +101,27 @@ class OverwriteCellSourceTool(BaseTool):
             ValueError: When cell_index is out of range
         """
         # Read notebook file as version 4 for consistency
-        with open(notebook_path, encoding="utf-8") as f:
-            notebook = nbformat.read(f, as_version=4)
+        try:
+            with open(notebook_path, encoding="utf-8") as f:
+                notebook = nbformat.read(f, as_version=4)
+        except Exception as e:
+            raise ToolError(
+                format_tool_error(
+                    "overwrite_cell_source",
+                    f"read notebook file '{notebook_path}'",
+                    e,
+                    context={"notebook_path": notebook_path},
+                    suggestions=["Use list_files to check the path."],
+                )
+            ) from e
         clean_notebook_outputs(notebook)
 
         if cell_index >= len(notebook.cells):
-            raise ValueError(
-                f"Cell index {cell_index} is out of range. Notebook has {len(notebook.cells)} cells."
+            raise ToolError(
+                f"[overwrite_cell_source] Cell index {cell_index} is out of range.\n"
+                f"  Notebook has {len(notebook.cells)} cells (valid indices: 0 to {len(notebook.cells) - 1}).\n"
+                f"  Suggestions:\n"
+                f"    - Use read_notebook to see all cells and their indices."
             )
 
         # Get original cell content
@@ -114,8 +131,18 @@ class OverwriteCellSourceTool(BaseTool):
         notebook.cells[cell_index].source = cell_source
 
         # Write back to file
-        with open(notebook_path, "w", encoding="utf-8") as f:
-            nbformat.write(notebook, f)
+        try:
+            with open(notebook_path, "w", encoding="utf-8") as f:
+                nbformat.write(notebook, f)
+        except Exception as e:
+            raise ToolError(
+                format_tool_error(
+                    "overwrite_cell_source",
+                    f"write notebook file '{notebook_path}'",
+                    e,
+                    context={"notebook_path": notebook_path},
+                )
+            ) from e
 
         return self._generate_diff(old_source, cell_source)
 
@@ -137,7 +164,12 @@ class OverwriteCellSourceTool(BaseTool):
         """
         async with notebook_manager.get_current_connection() as notebook:
             if cell_index >= len(notebook):
-                raise ValueError(f"Cell index {cell_index} out of range")
+                raise ToolError(
+                    f"[overwrite_cell_source] Cell index {cell_index} is out of range.\n"
+                    f"  Notebook has {len(notebook)} cells (valid indices: 0 to {len(notebook) - 1}).\n"
+                    f"  Suggestions:\n"
+                    f"    - Use read_notebook to see all cells and their indices."
+                )
 
             # Get original cell content
             old_source = notebook.get_cell_source(cell_index)
@@ -227,7 +259,11 @@ class OverwriteCellSourceTool(BaseTool):
             # MCP_SERVER mode: Use WebSocket connection with remote transaction management
             diff = await self._overwrite_cell_websocket(notebook_manager, cell_index, cell_source)
         else:
-            raise ValueError(f"Invalid mode or missing required clients: mode={mode}")
+            raise ToolError(
+                f"[overwrite_cell_source] Invalid mode or missing required clients: mode={mode}\n"
+                f"  Suggestions:\n"
+                f"    - Ensure the tool is called with a valid ServerMode."
+            )
 
         if not diff.strip() or diff == "no changes detected":
             return f"Cell {cell_index} overwritten successfully - no changes detected"

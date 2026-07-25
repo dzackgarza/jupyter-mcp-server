@@ -11,7 +11,7 @@ from mcp.types import ImageContent
 
 from jupyter_mcp_server.hooks import HookEvent, HookRegistry
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +48,7 @@ class ExecuteCodeTool(BaseTool):
     def _connect_to_kernel(self, kernel_id: str, server_client):
         """Connect to an existing kernel by ID (MCP_SERVER mode).
 
-        Returns (kernel, None) on success, or (None, error_message) if the id
-        does not name a kernel on the server.
+        Raises ToolError if the id does not name a kernel on the server.
         """
         from jupyter_kernel_client import KernelClient
 
@@ -58,9 +57,11 @@ class ExecuteCodeTool(BaseTool):
         if server_client is not None:
             kernels = server_client.kernels.list_kernels()
             if not any(kernel.id == kernel_id for kernel in kernels):
-                return None, (
-                    f"[ERROR: Kernel '{kernel_id}' not found in jupyter server, please check "
-                    f"whether the kernel already exists using 'list_kernels' tool.]"
+                raise ToolError(
+                    f"[execute_code] Kernel '{kernel_id}' not found.\n"
+                    f"  Suggestions:\n"
+                    f"    - Use list_kernels to see available kernels.\n"
+                    f"    - Use use_notebook to start a new kernel."
                 )
 
         config = get_config()
@@ -70,7 +71,7 @@ class ExecuteCodeTool(BaseTool):
             kernel_id=kernel_id,
         )
         kernel.start()
-        return kernel, None
+        return kernel
 
     async def _execute_via_notebook_manager(
         self,
@@ -97,9 +98,7 @@ class ExecuteCodeTool(BaseTool):
         # in the finally below, and never shut down.
         borrowed_kernel = None
         if kernel_id is not None and kernel_id != current_kernel_id:
-            kernel, error = self._connect_to_kernel(kernel_id, server_client)
-            if error is not None:
-                return [error]
+            kernel = self._connect_to_kernel(kernel_id, server_client)
             borrowed_kernel = kernel
             kid = kernel_id
         else:
@@ -248,7 +247,11 @@ class ExecuteCodeTool(BaseTool):
             List of outputs from the executed code
         """
         if safe_extract_outputs_fn is None:
-            raise ValueError("safe_extract_outputs_fn is required")
+            raise ToolError(
+                "[execute_code] safe_extract_outputs_fn is required.\n"
+                "  Suggestions:\n"
+                "    - Check tool initialization."
+            )
 
         # JUPYTER_SERVER mode: Use kernel_manager directly
         if mode == ServerMode.JUPYTER_SERVER and kernel_manager is not None:
@@ -288,9 +291,17 @@ class ExecuteCodeTool(BaseTool):
         # MCP_SERVER mode: Use notebook_manager (original behavior)
         elif mode == ServerMode.MCP_SERVER and notebook_manager is not None:
             if ensure_kernel_alive_fn is None:
-                raise ValueError("ensure_kernel_alive_fn is required for MCP_SERVER mode")
+                raise ToolError(
+                    "[execute_code] ensure_kernel_alive_fn is required for MCP_SERVER mode.\n"
+                    "  Suggestions:\n"
+                    "    - Check tool initialization."
+                )
             if wait_for_kernel_idle_fn is None:
-                raise ValueError("wait_for_kernel_idle_fn is required for MCP_SERVER mode")
+                raise ToolError(
+                    "[execute_code] wait_for_kernel_idle_fn is required for MCP_SERVER mode.\n"
+                    "  Suggestions:\n"
+                    "    - Check tool initialization."
+                )
 
             logger.info(f"Executing IPython in MCP_SERVER mode with kernel_id={kernel_id}")
             return await self._execute_via_notebook_manager(
@@ -305,4 +316,8 @@ class ExecuteCodeTool(BaseTool):
             )
 
         else:
-            return ["[ERROR: Invalid mode or missing required managers]"]
+            raise ToolError(
+                "[execute_code] Invalid server mode or missing required managers.\n"
+                "  Suggestions:\n"
+                "    - Valid modes are ServerMode.MCP_SERVER or ServerMode.JUPYTER_SERVER."
+            )

@@ -8,7 +8,7 @@ Each tool is implemented as a separate class with an execute method
 that can operate in either MCP_SERVER or JUPYTER_SERVER mode.
 """
 
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 from jupyter_mcp_server.tools.clear_cell_output_tool import ClearCellOutputTool
 from jupyter_mcp_server.tools.connect_jupyter_tool import ConnectJupyterTool
 from jupyter_mcp_server.tools.delete_cell_tool import DeleteCellTool
@@ -65,6 +65,8 @@ __all__ = [
     "ReadNotebookTool",
     "RestartNotebookTool",
     "ServerMode",
+    "ToolError",
     "UnuseNotebookTool",
     "UseNotebookTool",
+    "format_tool_error",
 ]

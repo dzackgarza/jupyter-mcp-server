@@ -21,7 +21,10 @@ import os
 from typing import Any, Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
 
 from jupyter_mcp_server.assistant_runtime import (
@@ -29,7 +32,7 @@ from jupyter_mcp_server.assistant_runtime import (
     configure_jupyter,
 )
 from jupyter_mcp_server.config import get_config
-from jupyter_mcp_server.notebook_id import encode_notebook_id
+from jupyter_mcp_server.notebook_id import encode_notebook_id, decode_notebook_id
 from jupyter_mcp_server.tools import (
     ClearCellOutputTool,
     DeleteCellTool,
@@ -80,11 +83,93 @@ _CONSEQUENTIAL_FALSE: dict[str, Any] = {"x-openai-isConsequential": False}
 
 class ErrorResponse(BaseModel):
     ok: bool = False
+    http_status: int
     error_type: str
     error_message: str
     traceback: str | None = None
     notebook_id: str | None = None
     notebook_path: str | None = None
+
+
+def _describe(exc: BaseException) -> str:
+    """Render an exception and its ``raise ... from`` chain as one line.
+
+    ``str(exc)`` is empty for argless exceptions (``NotImplementedError()``)
+    and drops the root cause for wrapped ones, so walk ``__cause__`` and fall
+    back to the qualified type name when there is no message.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        module = type(cur).__module__
+        name = type(cur).__name__
+        qualified = name if module in ("builtins", "") else f"{module}.{name}"
+        message = str(cur)
+        parts.append(f"{qualified}: {message}" if message else qualified)
+        cur = cur.__cause__ or cur.__context__
+    return "\n  caused by: ".join(parts)
+
+
+def _boundary_status(exc: BaseException) -> int | None:
+    """Return the HTTP status a wrapped Jupyter-boundary failure carried.
+
+    ``jupyter_server_client`` raises typed errors carrying ``.status_code``
+    (404 for a missing path, 403, …).  The tool layer wraps those in
+    ``ToolError``, which has no status, so without this the adapter would
+    report every boundary failure as a generic 500 and the caller could not
+    distinguish "you asked for a path that does not exist" from "the Jupyter
+    server is broken".
+    """
+    cur: BaseException | None = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        status = getattr(cur, "status_code", None)
+        if isinstance(status, int):
+            return status
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+def _error_json(request: Request, exc: BaseException, status_code: int) -> JSONResponse:
+    """Build the single error envelope every failing endpoint returns.
+
+    The envelope is served with **HTTP 200** and ``ok: false``, with the
+    status the failure would otherwise have carried in ``http_status``.
+
+    This is deliberate and specific to this API's consumer.  A GPT Action
+    calls ``raise_for_status()`` on the response, so on any non-2xx the
+    aiohttp client raises and the caller is shown the exception *type*
+    (``ClientResponseError: <class 'aiohttp.client_exceptions...'>``) —
+    the response body, and every diagnostic in it, is discarded before the
+    model ever sees it.  Returning 200 is what makes the error readable to
+    the only thing that reads it.  Clients must branch on ``ok``.
+    """
+    import traceback as tb_mod
+
+    notebook_id = request.path_params.get("notebook_id")
+    notebook_path = None
+    if notebook_id:
+        try:
+            notebook_path = decode_notebook_id(notebook_id)
+        except Exception:
+            pass
+
+    return JSONResponse(
+        status_code=200,
+        content=ErrorResponse(
+            http_status=status_code,
+            error_type=type(exc).__name__,
+            error_message=_describe(exc),
+            traceback="".join(
+                tb_mod.format_exception(type(exc), exc, exc.__traceback__)
+            ),
+            notebook_id=notebook_id,
+            notebook_path=notebook_path,
+        ).model_dump(),
+    )
 
 
 @app.exception_handler(Exception)
@@ -95,30 +180,27 @@ async def _global_exception_handler(request: Request, exc: Exception) -> JSONRes
     'Internal Server Error' string with zero diagnostic context, which
     leaves the GPT (and the user) unable to understand what went wrong.
     """
-    import traceback as tb_mod
+    return _error_json(request, exc, _boundary_status(exc) or 500)
 
-    # Extract notebook_id from path params if present
-    notebook_id = None
-    notebook_path = None
-    path_params = request.path_params
-    if "notebook_id" in path_params:
-        notebook_id = path_params["notebook_id"]
-        try:
-            notebook_path = decode_notebook_id(notebook_id)
-        except Exception:
-            pass
 
-    tb_str = tb_mod.format_exc()
-    return JSONResponse(
-        status_code=500,
-        content=ErrorResponse(
-            error_type=type(exc).__name__,
-            error_message=str(exc),
-            traceback=tb_str,
-            notebook_id=notebook_id,
-            notebook_path=notebook_path,
-        ).model_dump(),
-    )
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    """Give deliberate HTTPExceptions the same envelope as unhandled ones.
+
+    FastAPI's default returns ``{"detail": ...}``, so a client would have to
+    parse two different error shapes depending on which layer failed.
+    """
+    return _error_json(request, exc, exc.status_code)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Same envelope for 422s; the pydantic errors go in error_message."""
+    return _error_json(request, exc, 422)
 
 
 @app.on_event("startup")
@@ -329,19 +411,38 @@ async def _start_kernel_with_spec(kernel_name: str) -> str:
     Raises
     ------
     HTTPException
-        If the kernel could not be started (HTTP 400).
+        If the kernelspec is not installed on the server, or the kernel
+        could not be started (HTTP 400).
     """
     import httpx
 
     config = get_config()
     base_url = config.runtime_url or "http://localhost:8888"
     token = config.runtime_token
+    headers = {} if not token else {"Authorization": f"token {token}"}
 
     async with httpx.AsyncClient(timeout=30) as client:
+        # Check the kernelspec exists before asking for a kernel.  Jupyter
+        # accepts the request for an uninstalled spec, then crash-loops the
+        # launch five times and fails the websocket handshake with a bare
+        # 500 a minute later — by which point the real cause is gone.
+        specs_resp = await client.get(f"{base_url}/api/kernelspecs", headers=headers)
+        if specs_resp.status_code == 200:
+            available = sorted(specs_resp.json().get("kernelspecs", {}))
+            if kernel_name not in available:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Kernelspec '{kernel_name}' is not installed on the "
+                        f"Jupyter server at {base_url}. "
+                        f"Available kernels: {', '.join(available) or '(none)'}."
+                    ),
+                )
+
         resp = await client.post(
             f"{base_url}/api/kernels",
             json={"name": kernel_name},
-            headers={} if not token else {"Authorization": f"token {token}"},
+            headers=headers,
         )
 
     if resp.status_code != 201:
@@ -859,7 +960,7 @@ def main() -> None:
 
     uvicorn.run(
         app,
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "4041")),
+        host="127.0.0.1",
+        port=int(os.getenv("PORT", "4042")),
         workers=1,
     )

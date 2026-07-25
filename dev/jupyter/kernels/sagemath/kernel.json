@@ -1,0 +1,25 @@
+{
+  "argv": [
+    "sage",
+    "--python",
+    "-m",
+    "sage.repl.ipython_kernel",
+    "-f",
+    "{connection_file}"
+  ],
+  "display_name": "SageMath",
+  "language": "sage",
+  "metadata": {
+    "debugger": true,
+    "language_info": {
+      "name": "sage",
+      "mimetype": "text/x-sage",
+      "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+      },
+      "pygments_lexer": "ipython3",
+      "file_extension": ".py"
+    }
+  }
+}

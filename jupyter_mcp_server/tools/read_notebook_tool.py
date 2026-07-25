@@ -12,7 +12,7 @@ from jupyter_server_client import JupyterServerClient
 
 from jupyter_mcp_server.models import Notebook
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 from jupyter_mcp_server.utils import get_notebook_model
 
 
@@ -47,7 +47,14 @@ class ReadNotebookTool(BaseTool):
             Formatted table with cell information
         """
         if notebook_name not in notebook_manager:
-            return f"Notebook '{notebook_name}' is not connected. All currently connected notebooks: {list(notebook_manager.list_all_notebooks().keys())}"
+            connected = list(notebook_manager.list_all_notebooks().keys())
+            raise ToolError(
+                f"[read_notebook] Notebook '{notebook_name}' is not connected.\n"
+                f"  Connected notebooks: {connected}\n"
+                f"  Suggestions:\n"
+                f"    - Use list_notebooks to see available notebooks.\n"
+                f"    - Use use_notebook to connect to a notebook."
+            )
 
         if mode == ServerMode.JUPYTER_SERVER and contents_manager is not None:
             # Local mode: try the live YDoc first (collaborative session), same
@@ -71,17 +78,22 @@ class ReadNotebookTool(BaseTool):
                     contents_manager.get(notebook_path, content=True, type="notebook")
                 )
                 if "content" not in model:
-                    raise ValueError(f"Could not read notebook content from {notebook_path}")
+                    raise ToolError(f"[read_notebook] Could not read notebook content from {notebook_path}")
                 notebook = Notebook(**model["content"])
         elif mode == ServerMode.MCP_SERVER and notebook_manager is not None:
             # Remote mode: use WebSocket connection to Y.js document
             async with notebook_manager.get_notebook_connection(notebook_name) as notebook_content:
                 notebook = Notebook(**notebook_content.as_dict())
         else:
-            raise ValueError(f"Invalid mode or missing required clients: mode={mode}")
+            raise ToolError(f"[read_notebook] Invalid mode or missing required clients: mode={mode}")
 
         if start_index >= len(notebook):
-            return f"Start index {start_index} is out of range. Notebook has {len(notebook)} cells."
+            raise ToolError(
+                f"[read_notebook] Start index {start_index} is out of range.\n"
+                f"  Notebook has {len(notebook)} cells (valid indices: 0 to {len(notebook) - 1}).\n"
+                f"  Suggestions:\n"
+                f"    - Use a smaller start_index."
+            )
 
         info_list = [f"Notebook {notebook_name} has {len(notebook)} cells.\n"]
         info_list.append(

@@ -1,0 +1,14 @@
+[Unit]
+Description=Cloudflare tunnel for jupyter-assistant.dzackgarza.com
+After=network-online.target jupyter-assistant-api.service
+Wants=network-online.target jupyter-assistant-api.service
+
+[Service]
+# Config + credentials stay in ~/.cloudflared (not vendored — credentials-file
+# is a secret). Its ingress must point at 127.0.0.1:4042 to match main().
+ExecStart=/bin/cloudflared tunnel --config /home/dzack/.cloudflared/config-jupyter-assistant.yml run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

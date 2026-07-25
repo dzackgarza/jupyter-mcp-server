@@ -7,7 +7,7 @@
 import logging
 
 from jupyter_mcp_server.config import set_config
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -73,4 +73,16 @@ class ConnectJupyterTool(BaseTool):
         except Exception as e:
             error_msg = f"Failed to connect to Jupyter server {jupyter_url}: {e!s}"
             logger.error(error_msg)
-            raise Exception(error_msg)
+            raise ToolError(
+                format_tool_error(
+                    "connect_jupyter",
+                    f"connect to Jupyter server",
+                    e,
+                    context={"jupyter_url": jupyter_url, "provider": provider},
+                    suggestions=[
+                        "Ensure the URL format is correct (e.g., http://localhost:8888)",
+                        "Verify if the Jupyter server requires a token for authentication",
+                        "Check if the server is running and accessible",
+                    ],
+                )
+            ) from e

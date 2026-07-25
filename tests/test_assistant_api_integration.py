@@ -20,8 +20,8 @@ Covers spec required integration tests 1–9:
    (A,B,A), verifying that the final operation modifies only (A).
 7. Restart the API adapter and verify that the same ID reconnects to the
    same notebook filepath.
-8. Verify that failed notebook activation returns HTTP 400 and does not
-   execute against whichever notebook happened to be current.
+8. Verify that failed notebook activation is reported as a client error and
+   does not execute against whichever notebook happened to be current.
 9. Verify that two concurrent notebook operations are serialized by the
    runtime lock.
 """
@@ -83,6 +83,7 @@ def assistant_api_url(jupyter_server: str) -> Generator[str]:
     env = {
         **os.environ,
         "JUPYTER_URL": jupyter_server,
+        "JUPYTER_MCP_RUNTIME_URL": jupyter_server,
         "JUPYTER_TOKEN": "MY_TOKEN",
         "ALLOW_IMG_OUTPUT": "false",
         "JUPYTER_MCP_EXECUTION_TIMEOUT": "35",
@@ -102,8 +103,8 @@ def assistant_api_url(jupyter_server: str) -> Generator[str]:
             "--workers",
             "1",
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stdout=None,
+        stderr=None,
         env=env,
         cwd=os.path.dirname(os.path.dirname(__file__)),
     )
@@ -220,7 +221,7 @@ async def test_3_insert_and_execute_cell(client: AsyncClient) -> None:
         f"/v1/notebooks/{nb_id}/cells/insert-and-execute",
         json={"cell_index": 0, "cell_source": "print(2 + 2)", "timeout": 35},
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["ok"] is True
     assert data["cell_index"] == 0
@@ -270,7 +271,7 @@ async def test_5_kernel_continuity(client: AsyncClient) -> None:
         f"/v1/notebooks/{nb_id}/execute-code",
         json={"code": "x = 42", "timeout": 10},
     )
-    assert r1.status_code == 200
+    assert r1.json()["ok"] is True, r1.text
 
     # Read it in a separate request
     r2 = await client.post(
@@ -301,16 +302,18 @@ async def test_6_aba_interleaving(client: AsyncClient) -> None:
     b_id = b_create.json()["notebook_id"]
 
     # A: set x = 100
-    await client.post(
+    a_set = await client.post(
         f"/v1/notebooks/{a_id}/execute-code",
         json={"code": "x = 100", "timeout": 10},
     )
+    assert a_set.json()["ok"] is True, a_set.text
 
     # B: set x = 200
-    await client.post(
+    b_set = await client.post(
         f"/v1/notebooks/{b_id}/execute-code",
         json={"code": "x = 200", "timeout": 10},
     )
+    assert b_set.json()["ok"] is True, b_set.text
 
     # A: read x — must be 100, not 200
     a_read = await client.post(
@@ -405,7 +408,7 @@ def test_7_reconnect_after_adapter_restart(jupyter_server: str) -> None:
             json={"code": "y = 'persisted'", "timeout": 10},
             timeout=30,
         )
-        assert r.status_code == 200
+        assert r.json()["ok"] is True, r.text
     finally:
         proc1.terminate()
         proc1.wait(timeout=10)
@@ -425,9 +428,11 @@ def test_7_reconnect_after_adapter_restart(jupyter_server: str) -> None:
         assert r.status_code == 200
         assert r.json()["notebook_id"] == nb_id
 
-        # The notebook file still exists; read it
+        # The notebook file still exists; read it.  ``notebook_path`` alone
+        # cannot carry this claim: the error envelope also decodes it from
+        # the URL, so it matches even when the read failed.
         r = requests.get(f"{url2}/v1/notebooks/{nb_id}", timeout=30)
-        assert r.status_code == 200
+        assert r.json()["ok"] is True, r.text
         assert r.json()["notebook_path"] == unique
     finally:
         proc2.terminate()
@@ -448,7 +453,7 @@ def test_7_reconnect_after_adapter_restart(jupyter_server: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_8_failed_activation_returns_400(client: AsyncClient) -> None:
+async def test_8_failed_activation_returns_client_error(client: AsyncClient) -> None:
     # First, create a real notebook so *something* is current.
     create = await client.post(
         "/v1/notebooks/use",
@@ -466,7 +471,14 @@ async def test_8_failed_activation_returns_400(client: AsyncClient) -> None:
     # The ID is valid base64 but the notebook file does not exist.
     fake_id = _nb_id(f"does-not-exist-{uuid.uuid4().hex[:6]}.ipynb")
     resp = await client.get(f"/v1/notebooks/{fake_id}")
-    assert resp.status_code == 400
+    # Failures are reported as 200 + ok:false so a GPT Action can read the
+    # body; the status the failure would have carried is in http_status.
+    # A notebook that does not exist is 404, not a generic 400 or 500 —
+    # the caller can act on "wrong path" but not on "server fault".
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["http_status"] == HTTPStatus.NOT_FOUND, resp.text
 
     # The real notebook must still be operable — the failed call must not
     # have corrupted the current-notebook state.
@@ -516,3 +528,36 @@ async def test_9_concurrent_operations_serialized(client: AsyncClient) -> None:
     for r in results:
         assert not isinstance(r, Exception), f"Concurrent call failed: {r}"
         assert r.get("ok") is True, f"Response not ok: {r}"
+
+
+# ---------------------------------------------------------------------------
+# Test 10: A Jupyter-boundary failure is legible to the calling agent
+# ---------------------------------------------------------------------------
+
+
+async def test_10_jupyter_boundary_failure_is_legible(client: AsyncClient) -> None:
+    """A failure at the Jupyter contents boundary must arrive as readable data.
+
+    Observed defect: listing a directory that does not exist produced HTTP
+    500.  The consumer is a GPT Action whose client calls
+    ``raise_for_status()``, so on any non-2xx it raises and shows the caller
+    only the exception type — the response body, and every diagnostic in it,
+    is discarded.  The failure was therefore indistinguishable from every
+    other failure.
+
+    Owned claim: this adapter reports a Jupyter-boundary failure as a 200
+    response whose body carries the failure, and propagates the *Jupyter*
+    status (404 for a missing directory) rather than flattening it to 500.
+    """
+    missing_dir = f"no-such-dir-{uuid.uuid4().hex[:8]}"
+
+    resp = await client.get("/v1/files", params={"path": missing_dir})
+
+    # 200 on the wire is what keeps the body readable to the consumer.
+    assert resp.status_code == HTTPStatus.OK, resp.text
+    body = resp.json()
+    assert body["ok"] is False, resp.text
+    # The adapter's own failure type for a tool-boundary error.
+    assert body["error_type"] == "ToolError", resp.text
+    # The Jupyter 404 must survive, not collapse into a generic 500.
+    assert body["http_status"] == HTTPStatus.NOT_FOUND, resp.text

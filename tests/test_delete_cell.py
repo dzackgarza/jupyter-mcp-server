@@ -20,6 +20,7 @@ $ pytest tests/test_delete_cell.py -v
 import nbformat
 import pytest
 
+from jupyter_mcp_server.tools._base import ToolError
 from jupyter_mcp_server.tools.delete_cell_tool import DeleteCellTool
 
 
@@ -64,7 +65,7 @@ class TestDeleteCellValidation:
     )
     def test_invalid_indices_raise_error(self, indices, total):
         """Out-of-range indices (negative or too large) must be rejected."""
-        with pytest.raises((ValueError, IndexError)):
+        with pytest.raises((ValueError, IndexError, ToolError)):
             self.tool._validate_indices(indices, total)
 
     @pytest.mark.parametrize(
@@ -100,9 +101,8 @@ class TestDeleteCellFileNegativeIndices:
         path = str(tmp_path / "nb.ipynb")
         original = _write_notebook(path, 5)
 
-        with pytest.raises(ValueError, match="out of range"):
+        with pytest.raises((ValueError, ToolError), match="out of range"):
             await self.tool._delete_cell_file(path, [-100])
-
         assert _read_sources(path) == original  # notebook untouched
 
     @pytest.mark.asyncio
@@ -112,9 +112,8 @@ class TestDeleteCellFileNegativeIndices:
         path = str(tmp_path / "nb.ipynb")
         original = _write_notebook(path, 5)
 
-        with pytest.raises(ValueError, match="out of range"):
+        with pytest.raises((ValueError, ToolError), match="out of range"):
             await self.tool._delete_cell_file(path, [-1])
-
         assert _read_sources(path) == original  # last cell NOT deleted
 
     @pytest.mark.asyncio
@@ -124,9 +123,8 @@ class TestDeleteCellFileNegativeIndices:
         path = str(tmp_path / "nb.ipynb")
         original = _write_notebook(path, 5)
 
-        with pytest.raises(ValueError, match="out of range"):
+        with pytest.raises((ValueError, ToolError), match="out of range"):
             await self.tool._delete_cell_file(path, [0, -1])
-
         assert _read_sources(path) == original
 
     @pytest.mark.asyncio

@@ -10,7 +10,7 @@ from typing import Any
 from jupyter_server_client import JupyterServerClient
 
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +47,14 @@ class RestartNotebookTool(BaseTool):
             )
         except Exception as e:
             logger.error(f"Failed to reprovision kernel for notebook '{notebook_name}': {e}")
-            return (
-                f"Failed to restart notebook '{notebook_name}': the kernel was no longer "
-                f"available and reprovisioning failed: {e}"
-            )
+            raise ToolError(
+                format_tool_error(
+                    "restart_notebook",
+                    f"reprovision kernel for notebook '{notebook_name}'",
+                    e,
+                    context={"notebook_name": notebook_name},
+                )
+            ) from e
 
     async def execute(
         self,
@@ -83,12 +87,12 @@ class RestartNotebookTool(BaseTool):
         if mode == ServerMode.JUPYTER_SERVER:
             # JUPYTER_SERVER mode: Use kernel_manager to restart the kernel
             if kernel_manager is None:
-                return f"Failed to restart notebook '{notebook_name}': kernel_manager is required in JUPYTER_SERVER mode."
+                raise ToolError(f"[restart_notebook] Failed to restart notebook '{notebook_name}': kernel_manager is required in JUPYTER_SERVER mode.")
 
             # Get kernel ID from notebook_manager
             kernel_id = notebook_manager.get_kernel_id(notebook_name)
             if not kernel_id:
-                return f"Failed to restart notebook '{notebook_name}': kernel ID not found."
+                raise ToolError(f"[restart_notebook] Failed to restart notebook '{notebook_name}': kernel ID not found.")
 
             # Self-heal a stale binding: if the recorded kernel no longer exists
             # (idle-culled on JupyterHub, or the single-user server was restarted),
@@ -120,7 +124,14 @@ class RestartNotebookTool(BaseTool):
                         kernel_manager, notebook_manager, notebook_name
                     )
                 logger.error(f"Failed to restart kernel {kernel_id}: {e}")
-                return f"Failed to restart notebook '{notebook_name}': {e}"
+                raise ToolError(
+                    format_tool_error(
+                        "restart_notebook",
+                        f"restart kernel {kernel_id} for notebook '{notebook_name}'",
+                        e,
+                        context={"notebook_name": notebook_name, "kernel_id": kernel_id},
+                    )
+                ) from e
 
         elif mode == ServerMode.MCP_SERVER:
             # MCP_SERVER mode: Use notebook_manager's restart_notebook method
@@ -129,6 +140,6 @@ class RestartNotebookTool(BaseTool):
             if success:
                 return f"Notebook '{notebook_name}' kernel restarted successfully. Memory state and imported packages have been cleared."
             else:
-                return f"Failed to restart notebook '{notebook_name}'. The kernel may not support restart operation."
+                raise ToolError(f"[restart_notebook] Failed to restart notebook '{notebook_name}'. The kernel may not support restart operation.")
         else:
-            return f"Invalid mode: {mode}"
+            raise ToolError(f"[restart_notebook] Invalid mode: {mode}")

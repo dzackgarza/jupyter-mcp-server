@@ -78,7 +78,6 @@ async def test_list_files_local_supports_sync_and_async_managers(manager_cls):
 @pytest.mark.parametrize("manager_cls", MANAGERS)
 async def test_check_path_local_supports_sync_and_async_managers(manager_cls):
     """use_notebook must find an existing notebook with either flavour."""
-    ok, error = await UseNotebookTool()._check_path_local(
+    await UseNotebookTool()._check_path_local(
         manager_cls(), "notebook.ipynb", "connect"
     )
-    assert ok, error

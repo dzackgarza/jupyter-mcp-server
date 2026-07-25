@@ -11,7 +11,7 @@ import nbformat
 from jupyter_server_client import JupyterServerClient
 
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 from jupyter_mcp_server.utils import (
     clean_notebook_outputs,
     get_current_notebook_context,
@@ -38,16 +38,17 @@ class DeleteCellTool(BaseTool):
             total_cells: Total number of cells in the notebook
 
         Raises:
-            ValueError: When any index is negative or >= total_cells. Checking
-                each index (rather than only ``max(cell_indices)``) rejects
-                out-of-range negatives, which would otherwise raise a raw
-                IndexError or silently delete the wrong cell.
+            ToolError: When any index is negative or >= total_cells.
         """
         for cell_index in cell_indices:
             if cell_index < 0 or cell_index >= total_cells:
-                raise ValueError(
-                    f"Cell index {cell_index} is out of range. "
-                    f"Notebook has {total_cells} cells."
+                raise ToolError(
+                    f"[delete_cell] Cell index {cell_index} is out of range.\n"
+                    f"  Notebook has {total_cells} cells (valid indices: 0 to {total_cells - 1}).\n"
+                    f"  Requested indices: {cell_indices}\n"
+                    f"  Suggestions:\n"
+                    f"    - Use read_notebook to see all cells and their indices.\n"
+                    f"    - Cell indices are 0-based."
                 )
 
     async def _delete_cell_ydoc(
@@ -63,10 +64,24 @@ class DeleteCellTool(BaseTool):
         Returns:
             NotebookNode
         """
-        nb = await get_notebook_model(serverapp, notebook_path)
+        try:
+            nb = await get_notebook_model(serverapp, notebook_path)
+        except Exception as e:
+            raise ToolError(
+                format_tool_error(
+                    "delete_cell",
+                    f"read notebook via YDoc at '{notebook_path}'",
+                    e,
+                    context={"notebook_path": notebook_path},
+                    suggestions=[
+                        "Check that the notebook is open and the collaborative editing session is active.",
+                        "Try reconnecting with use_notebook(mode='connect').",
+                    ],
+                )
+            ) from e
+
         if nb:
             self._validate_indices(cell_indices, len(nb))
-
             cells = nb.delete_many_cells(cell_indices)
             return cells
         else:
@@ -83,9 +98,42 @@ class DeleteCellTool(BaseTool):
         Returns:
             List of deleted cells
         """
-        # Read notebook file as version 4 for consistency
-        with open(notebook_path, encoding="utf-8") as f:
-            notebook = nbformat.read(f, as_version=4)
+        path = Path(notebook_path)
+        if not path.exists():
+            raise ToolError(
+                f"[delete_cell] Notebook file not found at '{notebook_path}'.\n"
+                f"  The file does not exist on disk.\n"
+                f"  Suggestions:\n"
+                f"    - Use list_files to find the correct notebook path.\n"
+                f"    - Use use_notebook(mode='connect') to connect to an existing notebook.\n"
+                f"    - The notebook may have been renamed, moved, or deleted."
+            )
+
+        try:
+            # Read notebook file as version 4 for consistency
+            with open(notebook_path, encoding="utf-8") as f:
+                notebook = nbformat.read(f, as_version=4)
+        except nbformat.reader.NotJSONError as e:
+            raise ToolError(
+                format_tool_error(
+                    "delete_cell",
+                    f"read notebook file '{notebook_path}'",
+                    e,
+                    suggestions=[
+                        "The file exists but is not valid JSON.",
+                        "Check that the file is a valid .ipynb notebook.",
+                    ],
+                )
+            ) from e
+        except Exception as e:
+            raise ToolError(
+                format_tool_error(
+                    "delete_cell",
+                    f"read notebook file '{notebook_path}'",
+                    e,
+                    context={"file_exists": str(path.exists()), "file_size": str(path.stat().st_size) if path.exists() else "N/A"},
+                )
+            ) from e
 
         clean_notebook_outputs(notebook)
 
@@ -105,9 +153,26 @@ class DeleteCellTool(BaseTool):
         for cell_index in sorted(cell_indices, reverse=True):
             notebook.cells.pop(cell_index)
 
-        # Write back to file
-        with open(notebook_path, "w", encoding="utf-8") as f:
-            nbformat.write(notebook, f)
+        try:
+            # Write back to file
+            with open(notebook_path, "w", encoding="utf-8") as f:
+                nbformat.write(notebook, f)
+        except Exception as e:
+            raise ToolError(
+                format_tool_error(
+                    "delete_cell",
+                    f"write updated notebook back to '{notebook_path}'",
+                    e,
+                    context={
+                        "cells_deleted": str(cell_indices),
+                        "remaining_cells": str(len(notebook.cells)),
+                    },
+                    suggestions=[
+                        "The cells were removed in memory but the file could not be saved.",
+                        "Check file permissions and disk space.",
+                    ],
+                )
+            ) from e
 
         return deleted_cells
 
@@ -123,11 +188,32 @@ class DeleteCellTool(BaseTool):
         Returns:
             List of deleted cell information
         """
-        async with notebook_manager.get_current_connection() as notebook:
-            self._validate_indices(cell_indices, len(notebook))
-
-            cells = notebook.delete_many_cells(cell_indices)
-            return cells
+        try:
+            async with notebook_manager.get_current_connection() as notebook:
+                self._validate_indices(cell_indices, len(notebook))
+                cells = notebook.delete_many_cells(cell_indices)
+                return cells
+        except ToolError:
+            raise  # Already enriched
+        except Exception as e:
+            current_nb = notebook_manager.get_current_notebook() or "unknown"
+            current_path = notebook_manager.get_current_notebook_path() or "unknown"
+            raise ToolError(
+                format_tool_error(
+                    "delete_cell",
+                    f"delete cells {cell_indices} via WebSocket connection",
+                    e,
+                    context={
+                        "notebook_name": current_nb,
+                        "notebook_path": current_path,
+                    },
+                    suggestions=[
+                        "The WebSocket connection to the notebook may have been lost.",
+                        "Try reconnecting with use_notebook(mode='connect').",
+                        "Check that the Jupyter server is still running.",
+                    ],
+                )
+            ) from e
 
     async def execute(
         self,
@@ -165,11 +251,15 @@ class DeleteCellTool(BaseTool):
             server_client: HTTP client for MCP_SERVER mode
             contents_manager: Direct API access for JUPYTER_SERVER mode
             notebook_manager: Notebook manager instance
-            cell_index: Index of the cell to delete (0-based)
+            cell_indices: Indices of cells to delete (0-based)
+            include_source: Whether to include source of deleted cells
             **kwargs: Additional parameters
 
         Returns:
-            Success message
+            Success message with deleted cell info
+
+        Raises:
+            ToolError: If no notebook is active, indices are invalid, or deletion fails.
         """
         if mode == ServerMode.JUPYTER_SERVER and contents_manager is not None:
             # JUPYTER_SERVER mode: Try YDoc first, fall back to file operations
@@ -177,7 +267,25 @@ class DeleteCellTool(BaseTool):
 
             context = get_server_context()
             serverapp = context.serverapp
-            notebook_path, _ = get_current_notebook_context(notebook_manager)
+
+            try:
+                notebook_path, _ = get_current_notebook_context(notebook_manager)
+            except Exception as e:
+                raise ToolError(
+                    f"[delete_cell] No notebook is currently active.\n"
+                    f"  Error getting notebook context: {e}\n"
+                    f"  Suggestions:\n"
+                    f"    - Use use_notebook(notebook_name='...', notebook_path='...', mode='connect') to activate a notebook first.\n"
+                    f"    - Use list_notebooks to see available notebooks."
+                ) from e
+
+            if not notebook_path:
+                raise ToolError(
+                    f"[delete_cell] No notebook is currently active.\n"
+                    f"  Suggestions:\n"
+                    f"    - Use use_notebook(notebook_name='...', notebook_path='...', mode='connect') to activate a notebook first.\n"
+                    f"    - Use list_notebooks to see available notebooks."
+                )
 
             # Resolve to absolute path
             if serverapp and not Path(notebook_path).is_absolute():
@@ -195,7 +303,13 @@ class DeleteCellTool(BaseTool):
             # MCP_SERVER mode: Use WebSocket connection
             cells = await self._delete_cell_websocket(notebook_manager, cell_indices)
         else:
-            raise ValueError(f"Invalid mode or missing required clients: mode={mode}")
+            raise ToolError(
+                f"[delete_cell] Cannot delete cells: no notebook is active.\n"
+                f"  mode={mode}, notebook_manager={'provided' if notebook_manager else 'None'}\n"
+                f"  Suggestions:\n"
+                f"    - Use use_notebook(notebook_name='...', notebook_path='...', mode='connect') to activate a notebook first.\n"
+                f"    - Use list_notebooks to see available notebooks."
+            )
 
         info_list = []
         for cell_index, cell_info in zip(cell_indices, cells, strict=False):

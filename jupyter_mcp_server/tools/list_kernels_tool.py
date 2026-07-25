@@ -8,7 +8,7 @@ from typing import Any
 
 from jupyter_server_client import JupyterServerClient
 
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 from jupyter_mcp_server.utils import format_TSV
 
 
@@ -87,7 +87,20 @@ class ListKernelsTool(BaseTool):
             return output
 
         except Exception as e:
-            raise RuntimeError(f"Error listing kernels via HTTP: {e!s}")
+            try:
+                from jupyter_mcp_server.config import get_config
+                server_url = get_config().runtime_url
+            except Exception:
+                server_url = "unknown"
+            raise ToolError(
+                format_tool_error(
+                    "list_kernels",
+                    "list kernels via HTTP API",
+                    e,
+                    context={"server_url": server_url},
+                    suggestions=["Check if the Jupyter server is running and accessible."],
+                )
+            ) from e
 
     async def _list_kernels_local(
         self, kernel_manager: Any, kernel_spec_manager: Any
@@ -148,7 +161,15 @@ class ListKernelsTool(BaseTool):
             return output
 
         except Exception as e:
-            raise RuntimeError(f"Error listing kernels locally: {e!s}")
+            raise ToolError(
+                format_tool_error(
+                    "list_kernels",
+                    "list kernels locally",
+                    e,
+                    context={"kernel_manager": str(kernel_manager)},
+                    suggestions=["Check kernel manager state", "Check Jupyter server configuration"],
+                )
+            ) from e
 
     async def execute(
         self,
@@ -178,7 +199,11 @@ class ListKernelsTool(BaseTool):
         elif mode == ServerMode.MCP_SERVER and server_client is not None:
             kernel_list = self._list_kernels_http(server_client)
         else:
-            raise ValueError(f"Invalid mode or missing required managers/clients: mode={mode}")
+            raise ToolError(
+                f"[list_kernels] Invalid mode or missing required managers/clients: mode={mode}.\n"
+                f"  Suggestions:\n"
+                f"    - Valid modes are ServerMode.MCP_SERVER or ServerMode.JUPYTER_SERVER."
+            )
 
         if not kernel_list:
             return "No kernels found on the Jupyter server."
@@ -214,4 +239,12 @@ class ListKernelsTool(BaseTool):
             return format_TSV(headers, rows)
 
         except Exception as e:
-            return f"Error formatting kernel list: {e!s}"
+            raise ToolError(
+                format_tool_error(
+                    "list_kernels",
+                    "format kernel list as TSV",
+                    e,
+                    context={"num_kernels": len(kernel_list)},
+                    suggestions=["Check if kernel list contains valid data."],
+                )
+            ) from e

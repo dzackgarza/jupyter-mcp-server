@@ -10,7 +10,7 @@ from typing import Any
 from jupyter_server_client import JupyterServerClient
 
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ class UnuseNotebookTool(BaseTool):
             # which handles KernelClient cleanup automatically
             success = notebook_manager.remove_notebook(notebook_name)
         else:
-            return f"Invalid mode: {mode}"
+            raise ToolError(f"[unuse_notebook] Invalid mode: {mode}")
 
         if success:
             message = f"Notebook '{notebook_name}' unused successfully."
@@ -89,4 +89,4 @@ class UnuseNotebookTool(BaseTool):
 
             return message
         else:
-            return f"Notebook '{notebook_name}' was not found."
+            raise ToolError(f"[unuse_notebook] Notebook '{notebook_name}' was not found.")

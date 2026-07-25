@@ -23,6 +23,7 @@ from jupyter_mcp_server.utils import (
     get_jupyter_ydoc,
     safe_extract_outputs,
     wait_for_kernel_idle,
+    wait_for_kernel_ready,
     track_pending_execution,
 )
 
@@ -291,6 +292,9 @@ class ExecuteCellTool(BaseTool):
 
         elif mode == ServerMode.MCP_SERVER:
             kernel = ensure_kernel_alive_fn()
+            # A freshly created kernel's websocket may not be connected yet;
+            # waiting for idle alone races the handshake.
+            await wait_for_kernel_ready(kernel, max_wait_seconds=10)
             await wait_for_kernel_idle(kernel, max_wait_seconds=30)
             current_nb = notebook_manager.get_current_notebook() or "default"
             kid = notebook_manager.get_kernel_id(current_nb) or ""

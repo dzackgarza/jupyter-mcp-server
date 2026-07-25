@@ -166,9 +166,18 @@ class NotebookManager:
                 # In JUPYTER_SERVER mode, kernel is just metadata, actual kernel managed elsewhere
                 if not is_local and kernel and hasattr(kernel, "stop"):
                     kernel.stop()
-            except Exception:
-                # Ignore errors during kernel cleanup
-                pass
+            except Exception as e:
+                # Log kernel cleanup errors but don't block notebook removal.
+                # This is a cleanup operation — the user asked to remove the
+                # notebook, so we should not fail the entire operation because
+                # the kernel couldn't be stopped (it may already be dead).
+                logger.warning(
+                    "Failed to stop kernel during removal of notebook '%s': %s.%s: %s",
+                    name,
+                    type(e).__module__,
+                    type(e).__name__,
+                    e,
+                )
             finally:
                 del self._notebooks[name]
 
@@ -281,7 +290,14 @@ class NotebookManager:
                 if kernel and hasattr(kernel, "restart"):
                     kernel.restart()
                 return True
-            except Exception:
+            except Exception as e:
+                logger.error(
+                    "Failed to restart kernel for notebook '%s': %s.%s: %s",
+                    name,
+                    type(e).__module__,
+                    type(e).__name__,
+                    e,
+                )
                 return False
         return False
 
@@ -342,6 +358,16 @@ class NotebookManager:
         """
         return self._current_notebook
 
+    def get_current_kernel(self) -> KernelClient | dict[str, Any] | None:
+        """
+        Get the kernel for the currently active notebook.
+        
+        Returns:
+            Kernel client or None if no active notebook or no kernel found
+        """
+        current = self._current_notebook or self._default_notebook_name
+        return self.get_kernel(current)
+
     def get_current_connection(self) -> NotebookConnection:
         """
         Get the connection for the currently active notebook.
@@ -401,8 +427,8 @@ class NotebookManager:
                     kernel_status = (
                         "alive" if hasattr(kernel, "is_alive") and kernel.is_alive() else "dead"
                     )
-                except Exception:
-                    kernel_status = "error"
+                except Exception as e:
+                    kernel_status = f"error ({type(e).__name__}: {e})"
             else:
                 kernel_status = "not_initialized"
 

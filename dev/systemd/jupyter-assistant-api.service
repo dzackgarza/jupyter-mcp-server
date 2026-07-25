@@ -1,0 +1,17 @@
+[Unit]
+Description=Jupyter Assistant API (FastAPI adapter for GPT Actions)
+After=jupyter-sagemath.service
+Wants=jupyter-sagemath.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/dzack/gitclones/jupyter-assistant-api
+# direnv exec supplies JUPYTER_PATH, which shadows the system sagemath
+# kernelspec with the one that launches via `sage --python` (see .envrc).
+ExecStart=/bin/direnv exec /home/dzack/gitclones/jupyter-assistant-api /home/dzack/.local/bin/uv run jupyter-assistant-api
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/home/dzack
+
+[Install]
+WantedBy=default.target

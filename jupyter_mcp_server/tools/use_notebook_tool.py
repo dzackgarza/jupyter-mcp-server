@@ -14,7 +14,7 @@ from jupyter_server_client import JupyterServerClient, NotFoundError
 
 from jupyter_mcp_server.models import Notebook
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +64,32 @@ class UseNotebookTool(BaseTool):
 
         return {"id": kernel_id}
 
+    def _notebook_file_exists(
+        self,
+        mode: ServerMode,
+        server_client: JupyterServerClient | None,
+        contents_manager: Any | None,
+        notebook_path: str,
+    ) -> bool:
+        """Return whether ``notebook_path`` is present on the Jupyter server.
+
+        Listing the parent directory is used rather than fetching the file so
+        this stays cheap and matches how ``_check_path_*`` already decides
+        existence.
+        """
+        path = Path(notebook_path)
+        parent = path.parent.as_posix() if path.parent.as_posix() != "." else ""
+
+        if mode == ServerMode.JUPYTER_SERVER and contents_manager is not None:
+            return bool(contents_manager.exists(notebook_path))
+
+        listing = server_client.contents.list_directory(parent)
+        return path.name in [entry.name for entry in listing]
+
     async def _check_path_http(
         self, server_client: JupyterServerClient, notebook_path: str, mode: str
-    ) -> tuple[bool, str | None]:
-        """Check if path exists using HTTP API."""
+    ) -> None:
+        """Verify notebook path exists (HTTP mode). Raises ToolError on failure."""
         path = Path(notebook_path)
         try:
             parent_path = path.parent.as_posix() if path.parent.as_posix() != "." else ""
@@ -78,29 +100,65 @@ class UseNotebookTool(BaseTool):
                 dir_contents = server_client.contents.list_directory("")
 
             if mode == "connect":
-                file_exists = any(file.name == path.name for file in dir_contents)
+                available_names = [file.name for file in dir_contents]
+                file_exists = path.name in available_names
                 if not file_exists:
-                    return (
-                        False,
-                        f"'{notebook_path}' not found in jupyter server, please check the notebook already exists.",
+                    # Build a helpful list of .ipynb files the agent can choose from
+                    notebooks_in_dir = [n for n in available_names if n.endswith(".ipynb")]
+                    ctx = {
+                        "requested_path": notebook_path,
+                        "parent_directory": parent_path or "root",
+                    }
+                    if notebooks_in_dir:
+                        ctx["notebooks_in_directory"] = ", ".join(notebooks_in_dir)
+                    else:
+                        ctx["notebooks_in_directory"] = "(none)"
+                    raise ToolError(
+                        f"[use_notebook] Notebook '{notebook_path}' not found on the Jupyter server.\n"
+                        + "\n".join(f"  {k}: {v}" for k, v in ctx.items())
+                        + "\n  Suggestions:\n"
+                        f"    - Check the filename for typos (names are case-sensitive).\n"
+                        f"    - Use list_files(path='{parent_path or ''}') to browse available files.\n"
+                        f"    - Use use_notebook(mode='create') to create a new notebook at this path.",
+                        status_code=404,
                     )
 
-            return True, None
-        except NotFoundError:
+        except ToolError:
+            raise  # Already enriched
+        except NotFoundError as e:
             parent_dir = (
                 path.parent.as_posix() if path.parent.as_posix() != "." else "root directory"
             )
-            return (
-                False,
-                f"'{parent_dir}' not found in jupyter server, please check the directory path already exists.",
-            )
+            raise ToolError(
+                format_tool_error(
+                    "use_notebook",
+                    f"verify parent directory '{parent_dir}' exists",
+                    e,
+                    context={"notebook_path": notebook_path, "parent_directory": parent_dir},
+                    suggestions=[
+                        f"The directory '{parent_dir}' does not exist on the server.",
+                        "Use list_files(path='') to see the server root directory.",
+                        "Create the directory first, or use a different path.",
+                    ],
+                )
+            ) from e
         except Exception as e:
-            return False, f"Failed to check the path '{notebook_path}': {e}"
+            raise ToolError(
+                format_tool_error(
+                    "use_notebook",
+                    f"check path '{notebook_path}' on Jupyter server",
+                    e,
+                    suggestions=[
+                        "Check that the Jupyter server is running and accessible.",
+                        "Verify the server token is correct.",
+                    ],
+                )
+            ) from e
 
     async def _check_path_local(
         self, contents_manager: Any, notebook_path: str, mode: str
-    ) -> tuple[bool, str | None]:
-        """Check if path exists using local contents_manager API."""
+    ) -> None:
+        """Verify notebook path exists (local mode). Raises ToolError on failure."""
         path = Path(notebook_path)
         try:
             parent_path = str(path.parent) if str(path.parent) != "." else ""
@@ -111,17 +169,44 @@ class UseNotebookTool(BaseTool):
             )
 
             if mode == "connect":
-                file_exists = any(item["name"] == path.name for item in model.get("content", []))
+                available_names = [item["name"] for item in model.get("content", [])]
+                file_exists = path.name in available_names
                 if not file_exists:
-                    return (
-                        False,
-                        f"'{notebook_path}' not found in jupyter server, please check the notebook already exists.",
+                    notebooks_in_dir = [n for n in available_names if n.endswith(".ipynb")]
+                    ctx = {
+                        "requested_path": notebook_path,
+                        "parent_directory": parent_path or "root",
+                    }
+                    if notebooks_in_dir:
+                        ctx["notebooks_in_directory"] = ", ".join(notebooks_in_dir)
+                    else:
+                        ctx["notebooks_in_directory"] = "(none)"
+                    raise ToolError(
+                        f"[use_notebook] Notebook '{notebook_path}' not found on the Jupyter server.\n"
+                        + "\n".join(f"  {k}: {v}" for k, v in ctx.items())
+                        + "\n  Suggestions:\n"
+                        f"    - Check the filename for typos (names are case-sensitive).\n"
+                        f"    - Use list_files(path='{parent_path or ''}') to browse available files.\n"
+                        f"    - Use use_notebook(mode='create') to create a new notebook at this path.",
+                        status_code=404,
                     )
 
-            return True, None
+        except ToolError:
+            raise  # Already enriched
         except Exception as e:
             parent_dir = str(path.parent) if str(path.parent) != "." else "root directory"
-            return False, f"'{parent_dir}' not found in jupyter server: {e}"
+            raise ToolError(
+                format_tool_error(
+                    "use_notebook",
+                    f"check path '{notebook_path}' in local contents manager",
+                    e,
+                    context={"parent_directory": parent_dir},
+                    suggestions=[
+                        f"The directory '{parent_dir}' may not exist.",
+                        "Use list_files(path='') to see the server root directory.",
+                    ],
+                )
+            ) from e
 
     async def execute(
         self,
@@ -167,22 +252,55 @@ class UseNotebookTool(BaseTool):
             try:
                 server_client.get_status()
             except Exception as e:
-                return f"Failed to connect the Jupyter server: {e}"
+                raise ToolError(
+                    format_tool_error(
+                        "use_notebook",
+                        "connect to Jupyter server",
+                        e,
+                        context={"server_url": getattr(server_client, "base_url", "unknown")},
+                        suggestions=[
+                            "Check that the Jupyter server is running.",
+                            "Verify the server URL and token are correct.",
+                            "Use connect_to_jupyter to re-establish the connection.",
+                        ],
+                    )
+                ) from e
 
-        # Check the path exists
+        # Check the path exists (raises ToolError on failure)
         if mode == ServerMode.JUPYTER_SERVER and contents_manager is not None:
-            path_ok, error_msg = await self._check_path_local(
-                contents_manager, notebook_path, use_mode
-            )
+            await self._check_path_local(contents_manager, notebook_path, use_mode)
         elif mode == ServerMode.MCP_SERVER and server_client is not None:
-            path_ok, error_msg = await self._check_path_http(server_client, notebook_path, use_mode)
+            await self._check_path_http(server_client, notebook_path, use_mode)
         else:
-            return f"Invalid mode or missing required clients: mode={mode}"
-
-        if not path_ok:
-            return error_msg
+            raise ToolError(
+                f"[use_notebook] Invalid server mode or missing required clients.\n"
+                f"  mode={mode}, server_client={'provided' if server_client else 'None'}, "
+                f"contents_manager={'provided' if contents_manager else 'None'}\n"
+                f"  Suggestions:\n"
+                f"    - Use connect_to_jupyter to connect to a Jupyter server first.\n"
+                f"    - Check the server configuration."
+            )
 
         info_list = []
+
+        # A manager entry only means "we opened this once"; the file can have
+        # been deleted since (by the user in JupyterLab, or by a test's
+        # cleanup).  Decide "already created" from the file, not from memory:
+        # otherwise create mode returns success having created nothing, and
+        # every later read fails against a file that is not there.
+        if (
+            use_mode == "create"
+            and notebook_name in notebook_manager
+            and notebook_manager.get_notebook_path(notebook_name) == notebook_path
+            and not self._notebook_file_exists(
+                mode, server_client, contents_manager, notebook_path
+            )
+        ):
+            info_list.append(
+                f"[INFO] Recreating notebook '{notebook_name}': its file is no "
+                f"longer present at '{notebook_path}'."
+            )
+            notebook_manager.remove_notebook(notebook_name)
 
         # Check if notebook already in notebook_manager (Cober all cases)
         if notebook_name in notebook_manager:
@@ -240,12 +358,19 @@ class UseNotebookTool(BaseTool):
                     kernels = server_client.kernels.list_kernels()
                     kernel_exists = any(kernel.id == kernel_id for kernel in kernels)
                     if not kernel_exists:
-                        return f"Kernel '{kernel_id}' not found in jupyter server, please check whether the kernel already exists using 'list_kernels' tool."
+                        raise ToolError(
+                        f"[use_notebook] Kernel '{kernel_id}' not found on the Jupyter server.\n"
+                        f"  Suggestions:\n"
+                        f"    - Use list_kernels to see available kernel IDs.\n"
+                        f"    - Omit kernel_id to start a new kernel automatically."
+                    )
+                print(f"DEBUG KERNEL START: url={runtime_url}, token={runtime_token}, id={kernel_id}", flush=True)
                 kernel = KernelClient(
-                    server_url=runtime_url, token=runtime_token, kernel_id=kernel_id
+                    server_url=runtime_url, token=runtime_token, kernel_id=kernel_id, client_kwargs={"reconnect_interval": 1.0}
                 )
                 # FIXED: Ensure kernel is started with the same path as the notebook
                 kernel.start(path=notebook_path)
+                print(f"DEBUG KERNEL STARTED: connection_ready={getattr(kernel._manager.client, 'connection_ready', 'MISSING')}", flush=True)
 
                 info_list.append(f"[INFO] Connected to kernel '{kernel.id}'.")
             elif mode == ServerMode.JUPYTER_SERVER and kernel_manager is not None:
@@ -253,7 +378,12 @@ class UseNotebookTool(BaseTool):
                 if kernel_id:
                     # Connect to existing kernel - verify it exists
                     if kernel_id not in kernel_manager:
-                        return f"Kernel '{kernel_id}' not found in local kernel manager."
+                        raise ToolError(
+                        f"[use_notebook] Kernel '{kernel_id}' not found in local kernel manager.\n"
+                        f"  Suggestions:\n"
+                        f"    - Use list_kernels to see available kernel IDs.\n"
+                        f"    - Omit kernel_id to start a new kernel automatically."
+                    )
                     kernel = {"id": kernel_id}
                 else:
                     kernel = await self._start_kernel_local(kernel_manager, path=notebook_path)
@@ -297,7 +427,14 @@ class UseNotebookTool(BaseTool):
                     notebook_name, kernel, server_url="local", token=None, path=notebook_path
                 )
             else:
-                return f"Invalid configuration: mode={mode}, runtime_url={runtime_url}, kernel_manager={kernel_manager is not None}"
+                raise ToolError(
+                    f"[use_notebook] Cannot register notebook: invalid configuration.\n"
+                    f"  mode={mode}, runtime_url={runtime_url}, kernel_manager={'provided' if kernel_manager else 'None'}\n"
+                    f"  Suggestions:\n"
+                    f"    - In MCP_SERVER mode, a runtime_url is required.\n"
+                    f"    - In JUPYTER_SERVER mode, a kernel_manager must be available.\n"
+                    f"    - Use connect_to_jupyter to configure the connection."
+                )
 
             notebook_manager.set_current_notebook(notebook_name)
             info_list.append(f"[INFO] Successfully activate notebook '{notebook_name}'.")

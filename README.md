@@ -1,551 +1,582 @@
 <!--
-  ~ Copyright (c) 2024- Datalayer, Inc.
+  ~ Copyright (c) 2024-2025 Datalayer, Inc. / dzackgarza
   ~
   ~ BSD 3-Clause License
--->
+  -->
 
-[![Datalayer](https://images.datalayer.io/brand/logos/datalayer-horizontal.svg)](https://datalayer.io)
+# Jupyter Assistant API
 
-[![Become a Sponsor](https://img.shields.io/static/v1?label=Become%20a%20Sponsor&message=%E2%9D%A4&logo=GitHub&style=flat&color=1ABC9C)](https://github.com/sponsors/datalayer)
+**Stateless HTTP/OpenAPI adapter over Jupyter MCP Server tool classes, designed for GPT Actions.**
 
-<div align="center">
+This is a thin FastAPI transport layer that replaces the MCP protocol with a stateless REST API. Each request names the target notebook via a deterministic `nb_<base64>` ID derived from its Jupyter-root-relative filepath — no session state, no persisted mappings, survives restarts.
 
-<!-- omit in toc -->
+---
 
-# 🪐🔧 Jupyter MCP Server
+## Architecture
 
-**An [MCP](https://modelcontextprotocol.io) server developed for AI to connect and manage [Jupyter](https://jupyter.org) Notebooks in real-time**
-
-*Developed by [Datalayer](https://github.com/datalayer)*
-
-[![PyPI - Version](https://img.shields.io/pypi/v/jupyter-mcp-server?style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/jupyter-mcp-server)
-[![Total PyPI downloads](https://img.shields.io/pepy/dt/jupyter-mcp-server?style=for-the-badge&logo=python&logoColor=white)](https://pepy.tech/project/jupyter-mcp-server)
-[![Docker Pulls](https://img.shields.io/docker/pulls/datalayer/jupyter-mcp-server?style=for-the-badge&logo=docker&logoColor=white&color=2496ED)](https://hub.docker.com/r/datalayer/jupyter-mcp-server)
-[![License](https://img.shields.io/badge/License-BSD_3--Clause-blue?style=for-the-badge&logo=open-source-initiative&logoColor=white)](https://opensource.org/licenses/BSD-3-Clause)
-
-![Jupyter MCP Server Demo](https://images.datalayer.io/products/jupyter-mcp-server/mcp-demo-multimodal.gif)
-
-</div>
-
-> [!IMPORTANT]
->
-> - **Update in v1.0.2:**: Configurable timeout: `execute_cell` timeout is now configurable via `JUPYTER_MCP_EXECUTION_TIMEOUT` env var or `execution_timeout` config (default: 120s, max: 3600s). Per-call `timeout=0` uses the config default.
->
-> **Hotfixes in v1.0.3:**
->
-> - **Management routes security (`/api/connect`, `/api/stop`, `/api/healthz`)** has been hardened in standalone `streamable-http` mode:
->   - local `Host` is required for all management routes
->   - non-local browser `Origin` is rejected
->   - `MCP_TOKEN` (Bearer) is required for state-changing routes (`/api/connect`, `/api/stop`)
->
-> **Update in v1.0.2:** `pycrdt` is now supported, so installing `datalayer_pycrdt` is no longer required.
->
-> **Breaking change in v1.0.0:** You must configure `MCP_TOKEN` in your MCP client setup.
->
-> For setup details, see: https://jupyter-mcp-server.datalayer.tech/providers/jupyter-streamable-http-standalone/#3-configure-your-mcp-client
-
-> [!NOTE]
-> **We Need Your Feedback!**
->
-> We're actively developing support for **JupyterHub** and **Google Colab** deployments. If you're using or planning to use Jupyter MCP Server with these platforms, we'd love to hear from you!
->
-> - 🏢 **JupyterHub users**: Share your deployment setup and requirements
-> - 🌐 **Google Colab users**: Help us understand your use cases and workflows
->
-> Join the conversation in our [Community page](https://jupyter-mcp-server.datalayer.tech/community) - your feedback will help us prioritize features and ensure these integrations work seamlessly for your needs.
-
-## 📖 Table of Contents
-
-- [Key Features](#-key-features)
-- [MCP Overview](#-mcp-overview)
-- [Getting Started](#-getting-started)
-- [Sandbox Variants](#-execution-engines)
-- [Best Practices](#-best-practices)
-- [Contributing](#-contributing)
-- [Resources](#-resources)
-
-## 🚀 Key Features
-
-- ⚡ **Real-time control:** Instantly view notebook changes as they happen.
-- 🔁 **Smart execution:** Automatically adjusts when a cell run fails thanks to cell output feedback.
-- 🧠 **Context-aware:** Understands the entire notebook context for more relevant interactions.
-- 📊 **Multimodal support:** Support different output types, including images, plots, and text.
-- 📚 **Multi-notebook support:** Seamlessly switch between multiple notebooks.
-- 🎨 **JupyterLab integration:** Enhanced UI integration like automatic notebook opening.
-- 🤝 **MCP-compatible:** Works with any MCP client, such as Claude Desktop, Cursor, Windsurf, and more.
-- 🔍 **Observability:** Built-in hook system with OpenTelemetry integration for tracing tool calls and kernel executions.
-
-Compatible with any Jupyter deployment (local, JupyterHub, ...) and with [Datalayer](https://datalayer.ai) hosted Notebooks.
-
-## 🔧 MCP Overview
-
-### 🔧 Tools Overview
-
-The server provides a rich set of tools for interacting with Jupyter notebooks, categorized as follows.
-For more details on each tool, their parameters, and return values, please refer to the [official Tools documentation](https://jupyter-mcp-server.datalayer.tech/tools).
-
-#### Server and Runtime Management Tools
-
-| Name                 | Description                                                                                                                                                                                                                                                                                              |
-| :------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list_files`         | List files and directories in the Jupyter server's file system.                                                                                                                                                                                                                                          |
-| `list_kernels`       | List all available and running kernel sessions on the Jupyter server.                                                                                                                                                                                                                                    |
-| `launch_sandbox`     | Launch a sandbox runtime (eval/docker/jupyter/datalayer/kaggle/colab/monty/modal) as an alternative execution backend for `execute_code`. Supports variant-specific options including GPU flavor for supported backends. Requires the `jupyter_mcp_sandboxes` extension.                      |
-| `list_sandboxes`     | List launched sandbox runtimes and their state (active flag, variant, status, and selected runtime options). Requires the `jupyter_mcp_sandboxes` extension.                                                                                                                               |
-| `use_sandbox`        | Select or clear the active sandbox used by `execute_code`, enabling dynamic routing between kernel-backed and sandbox-backed execution. Requires the `jupyter_mcp_sandboxes` extension.                                                                                                     |
-| `terminate_sandbox`  | Stop and unregister a launched sandbox runtime. Requires the `jupyter_mcp_sandboxes` extension.                                                                                                                                                                                              |
-| `connect_to_jupyter` | Connect to a Jupyter server dynamically without restarting the MCP server. *Not available when running as Jupyter extension. Useful for switching servers dynamically or avoiding hardcoded configuration.* [Read more](https://jupyter-mcp-server.datalayer.tech/reference/tools/#7-connect_to_jupyter) |
-
-#### Multi-Notebook Management Tools
-
-| Name               | Description                                                                |
-| :----------------- | :------------------------------------------------------------------------- |
-| `use_notebook`     | Connect to a notebook file, create a new one, or switch between notebooks. |
-| `list_notebooks`   | List all notebooks available on the Jupyter server and their status        |
-| `restart_notebook` | Restart the kernel for a specific managed notebook.                        |
-| `unuse_notebook`   | Disconnect from a specific notebook and release its resources.             |
-| `read_notebook`    | Read notebook cells source content with brief or detailed format options.  |
-
-#### Cell Operations and Execution Tools
-
-| Name                       | Description                                                                      |
-| :------------------------- | :------------------------------------------------------------------------------- |
-| `read_cell`                | Read the full content (Metadata, Source and Outputs) of a single cell.           |
-| `insert_cell`              | Insert a new code or markdown cell at a specified position.                      |
-| `delete_cell`              | Delete a cell at a specified index.                                              |
-| `move_cell`                | Move a cell from one position to another within a notebook.                      |
-| `clear_cell_output`        | Clear the outputs and execution count of a single code cell.                     |
-| `overwrite_cell_source`    | Overwrite the source code of an existing cell.                                   |
-| `edit_cell_source`         | Apply surgical find-and-replace edits to a cell's source without full rewrite.   |
-| `execute_cell`             | Execute a cell with timeout, supports multimodal output including images.        |
-| `insert_execute_code_cell` | Insert a new code cell and execute it in one step.                               |
-| `execute_code`             | Execute code directly in the active backend (kernel by default, or active sandbox if selected), supports magic commands and shell commands. When the selected sandbox supports streaming execution, progress/output events are consumed and returned in order. |
-
-#### JupyterLab Integration
-
-*Available only when JupyterLab mode is enabled. It is enabled by default.*
-
-When running in JupyterLab mode, Jupyter MCP Server integrates with [jupyter-mcp-tools](https://github.com/datalayer/jupyter-mcp-tools) to expose additional JupyterLab commands as MCP tools. By default, the following tools are enabled:
-
-| Name                         | Description                                            |
-| :--------------------------- | :----------------------------------------------------- |
-| `notebook_run-all-cells`     | Execute all cells in the current notebook sequentially |
-| `notebook_get-selected-cell` | Get information about the currently selected cell      |
-
-<details>
-<summary><strong>📚 Learn how to customize additional tools</strong></summary>
-
-You can now customize which tools from `jupyter-mcp-tools` are available using the `allowed_jupyter_mcp_tools` configuration parameter. This allows you to enable additional notebook operations, console commands, file management tools, and more.
-
-```bash
-# Example: Enable additional tools via command-line
-jupyter lab --port 4040 --IdentityProvider.token MY_TOKEN --JupyterMCPServerExtensionApp.allowed_jupyter_mcp_tools="notebook_run-all-cells,notebook_get-selected-cell,notebook_append-execute,console_create"
+```
+Custom GPT → HTTPS → cloudflared tunnel → FastAPI adapter → existing tool classes → JupyterLab
 ```
 
-For the complete list of available tools and detailed configuration instructions, please refer to the [Additional Tools documentation](https://jupyter-mcp-server.datalayer.tech/reference/tools-additional).
+- **Adapter**: Uvicorn on `127.0.0.1:4042`, `workers=1` (required by `asyncio.Lock` around `NotebookManager`)
+- **Public URL**: `https://jupyter-assistant.dzackgarza.com`
+- **JupyterLab**: port 8888, no auth, `root_dir=~/research/computations/notebooks`
+- **Default kernelspec**: `sagemath` — kernel pre-started via Jupyter REST API (not the MCP tool's default `python3`)
+- **Lock model**: single `asyncio.Lock` around all notebook-specific operations; one Uvicorn worker enforces serialization
 
-</details>
+### Key Design Decisions
 
-### 📝 Prompt Overview
+| Decision | Rationale |
+|---|---|
+| Deterministic `nb_<base64>` IDs | No persisted mapping; survives restart; reversible to filepath |
+| `x-openai-isConsequential: false` on all 11 mutation routes | Enables "always allow" mode in ChatGPT Actions |
+| Pre-start kernel via REST API | `UseNotebookTool` connects to a pre-started kernel with the requested kernelspec instead of defaulting to `python3` |
+| `workers=1` | `NotebookManager` is process-wide state; >1 worker races on the current-notebook pointer |
+| Global exception handler | Catches unhandled exceptions with structured JSON + traceback so the GPT can diagnose failures |
 
-The server also supports [prompt feature](https://modelcontextprotocol.io/specification/2025-06-18/server/prompts) of MCP, providing a easy way for user to interact with Jupyter notebooks.
+---
 
-| Name           | Description                                                                 |
-| :------------- | :-------------------------------------------------------------------------- |
-| `jupyter-cite` | Cite specific cells from specified notebook (like `@` in Coding IDE or CLI) |
+## API Endpoints
 
-For more details on each prompt, their input parameters, and return content, please refer to the [official Prompt documentation](https://jupyter-mcp-server.datalayer.tech/reference/prompts).
+All routes are served under `https://jupyter-assistant.dzackgarza.com`. The full OpenAPI spec is at `/openapi.json`.
 
-## 🏁 Getting Started
+### Server-level
 
-For comprehensive setup instructions—including `Streamable HTTP` transport, running as a Jupyter Server extension and advanced configuration—check out [our documentation](https://jupyter-mcp-server.datalayer.tech/). Or, get started quickly with `JupyterLab` and `STDIO` transport here below.
+| Method | Path | Operation ID | Description |
+|---|---|---|---|
+| GET | `/health` | `health` | Report API and Jupyter server readiness |
+| GET | `/v1/files` | `list_files` | List files on the Jupyter server |
+| GET | `/v1/kernels` | `list_kernels` | List active kernels |
+| GET | `/v1/notebooks` | `list_notebooks` | List all `.ipynb` files |
 
-### 1. Set Up Your Environment
+### Notebook lifecycle
 
-```bash
-pip install jupyterlab==4.4.1 jupyter-collaboration==4.0.2 jupyter-mcp-tools>=0.1.4 ipykernel pycrdt
+| Method | Path | Operation ID | Description |
+|---|---|---|---|
+| POST | `/v1/notebooks/use` | `use_notebook` | Open or create a notebook (requires `notebook_path`, optional `kernel_name` defaults to `sagemath`) |
+| POST | `/v1/notebooks/{notebook_id}/restart` | `restart_notebook` | Restart the notebook's kernel |
+
+### Reading
+
+| Method | Path | Operation ID | Description |
+|---|---|---|---|
+| GET | `/v1/notebooks/{notebook_id}` | `read_notebook` | Read notebook contents (paginated; `brief` or `detailed` format) |
+| GET | `/v1/notebooks/{notebook_id}/cells/{cell_index}` | `read_cell` | Read a single cell by index |
+
+### Cell mutations
+
+| Method | Path | Operation ID | Description |
+|---|---|---|---|
+| POST | `/v1/notebooks/{notebook_id}/cells` | `insert_cell` | Insert a cell at the given index |
+| PUT | `/v1/notebooks/{notebook_id}/cells/{cell_index}` | `overwrite_cell_source` | Overwrite cell source |
+| PATCH | `/v1/notebooks/{notebook_id}/cells/{cell_index}` | `edit_cell_source` | Find-and-replace edit on cell source |
+| DELETE | `/v1/notebooks/{notebook_id}/cells` | `delete_cell` | Delete one or more cells |
+| POST | `/v1/notebooks/{notebook_id}/cells/move` | `move_cell` | Move a cell from source to target index |
+| POST | `/v1/notebooks/{notebook_id}/cells/{cell_index}/clear-output` | `clear_cell_output` | Clear cell output |
+
+### Execution
+
+| Method | Path | Operation ID | Description |
+|---|---|---|---|
+| POST | `/v1/notebooks/{notebook_id}/cells/{cell_index}/execute` | `execute_cell` | Execute a cell by index |
+| POST | `/v1/notebooks/{notebook_id}/cells/insert-and-execute` | `insert_execute_code_cell` | Insert + execute a code cell in one step |
+| POST | `/v1/notebooks/{notebook_id}/execute-code` | `execute_code` | Execute temporary code without inserting a cell |
+
+---
+
+## GPT Actions Setup
+
+This adapter is designed for ChatGPT Custom GPTs via the Actions feature.
+
+### 1. Import the OpenAPI spec
+
+1. Open the GPT editor → **Actions** → **Create new action**
+2. Click **Import from URL**
+3. Paste:
+   ```
+   https://jupyter-assistant.dzackgarza.com/openapi.json
+   ```
+4. The schema loads with all 17 endpoints, request/response models, and operation IDs
+
+### 2. Authentication
+
+Set to **None** (the adapter has no auth layer — it sits behind cloudflared on localhost).
+
+If you add auth later, set the GPT to send an API key header and add a middleware check in `assistant_api.py`.
+
+### 3. "Always allow" mutations
+
+All 11 mutation endpoints carry `x-openai-isConsequential: false` in the OpenAPI spec. This tells ChatGPT the operations are non-destructive, enabling the **"Always allow"** toggle so the GPT doesn't prompt for confirmation on every write.
+
+Without this, ChatGPT asks "Allow this action?" on every cell insert, execute, delete, etc. — unusable for a multi-step workflow.
+
+### 4. Suggested system prompt
+
+Add this to the GPT's **Instructions** field to teach it the notebook ID workflow:
+
+```
+You have access to a Jupyter notebook server via the Jupyter Assistant API.
+
+Notebook workflow:
+- List available notebooks with GET /v1/notebooks (returns *.ipynb files with paths)
+- Open a notebook with POST /v1/notebooks/use { "notebook_path": "<path>" }
+  - This returns a deterministic notebook_id (nb_<base64>) for all subsequent calls
+  - Default kernel is sagemath; override with "kernel_name" parameter
+- All cell operations use the notebook_id in the URL path
+- Execute code with POST /v1/notebooks/{notebook_id}/execute-code for ephemeral snippets
+- Insert persistent cells with POST /v1/notebooks/{notebook_id}/cells/insert-and-execute
+
+Available kernels: sagemath (default), python3, pari_jupyter, gap, singular, lean4, octave, coconut, julia-1.10
+
+Rules:
+- Always list notebooks before opening one to confirm the path exists
+- Read the notebook before editing to understand its structure
+- Use brief format for read_notebook unless you need full output details
+- Cell indices are 0-based; -1 means append
 ```
 
-> [!TIP]
-> To confirm your environment is correctly configured:
->
-> 1. Open a notebook in JupyterLab
-> 1. Type some content in any cell (code or markdown)
-> 1. Observe the tab indicator: you should see an "×" appear next to the notebook name, indicating unsaved changes
-> 1. Wait a few seconds—the "×" should automatically change to a "●" without manually saving
->
-> This automatic saving behavior confirms that the real-time collaboration features are working properly, which is essential for MCP server integration.
+### 5. Test it
 
-### 2. Start JupyterLab
+After saving the GPT, try:
 
-```bash
-# Start JupyterLab on port 8888, allowing access from any IP and setting a token
-jupyter lab --port 8888 --IdentityProvider.token MY_TOKEN --ip 0.0.0.0
-```
+> "List my notebooks and show me what's in periods/fermat-periods.ipynb"
 
-> [!NOTE]
-> If you are running notebooks through JupyterHub instead of JupyterLab as above, refer to our [JupyterHub setup guide](https://jupyter-mcp-server.datalayer.tech//providers/jupyterhub-streamable-http/).
+The GPT should:
+1. Call `list_notebooks` → get the file list
+2. Call `use_notebook` with `periods/fermat-periods.ipynb` → get a `notebook_id`
+3. Call `read_notebook` with that ID → return cell contents
 
-### 3. Configure Your Preferred MCP Client
+---
 
-Next, configure your MCP client to connect to the server. We offer two primary methods—choose the one that best fits your needs:
+## JupyterLab Setup
 
-- **📦 Using `uvx` (Recommended for Quick Start):** A lightweight and fast method using `uv`. Ideal for local development and first-time users.
-- **🐳 Using `Docker` (Recommended for Production):** A containerized approach that ensures a consistent and isolated environment, perfect for production or complex setups.
+The adapter expects a running JupyterLab on port 8888 with no authentication and the `sagemath` kernelspec as default.
 
-<details>
-<summary><b>📦 Using uvx (Quick Start)</b></summary>
+### Requirements
 
-First, install `uv`:
+- **JupyterLab 4.4.x** with `jupyter-collaboration` (enables real-time model sync that the tool classes depend on)
+- **A SageMath kernel** — or any other kernelspec you want as default
+- **Notebooks root** — a directory where the adapter looks for `.ipynb` files (default: `~/research/computations/notebooks`)
+
+### Quick start (manual)
 
 ```bash
-pip install uv
-uv --version
-# should be 0.6.14 or higher
+jupyter lab \
+  --port 8888 \
+  --ip 0.0.0.0 \
+  --no-browser \
+  --IdentityProvider.token='' \
+  --IdentityProvider.password_required=False \
+  --ServerApp.disable_check_xsrf=True \
+  --ServerApp.root_dir=~/research/computations/notebooks
 ```
 
-See more details on [uv installation](https://docs.astral.sh/uv/getting-started/installation/).
+Flags explained:
+- `--IdentityProvider.token=''` and `--IdentityProvider.password_required=False` — no auth (the adapter runs on localhost; cloudflared handles HTTPS)
+- `--ServerApp.disable_check_xsrf=True` — required for the adapter to make API calls without CSRF tokens
+- `--ServerApp.root_dir` — the directory where notebook files live; this becomes the root for `list_notebooks` and `use_notebook` paths
 
-Then, configure your client:
+### systemd user service (recommended)
+
+Create `~/.config/systemd/user/jupyter-sagemath.service`:
+
+```ini
+[Unit]
+Description=JupyterLab (SageMath kernel)
+After=default.target
+
+[Service]
+Type=simple
+ExecStartPre=/path/to/check-port-8888.py
+ExecStart=/usr/bin/jupyter lab \
+  --port 8888 \
+  --ip 0.0.0.0 \
+  --no-browser \
+  --IdentityProvider.token='' \
+  --IdentityProvider.password_required=False \
+  --ServerApp.disable_check_xsrf=True \
+  --ServerApp.root_dir=/home/YOU/research/computations/notebooks
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/home/YOU
+Environment=JUPYTER_PORT=8888
+
+[Install]
+WantedBy=default.target
+```
+
+Then:
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now jupyter-sagemath.service
+systemctl --user status jupyter-sagemath.service
+```
+
+The `ExecStartPre` script (optional) kills any stale process already bound to port 8888 before starting. Remove the line if you don't need it.
+
+### Verify
+
+```bash
+curl -s http://localhost:8888/api/status | python3 -m json.tool
+# Should return Jupyter server status JSON
+
+curl -s http://localhost:8888/api/kernelspecs | python3 -c "import sys,json; print(list(json.load(sys.stdin)['kernelspecs'].keys()))"
+# Should list available kernelspecs, e.g. ['sagemath', 'python3', ...]
+```
+
+### Available kernels on this machine
+
+| Kernelspec | Language | Notes |
+|---|---|---|
+| `sagemath` | SageMath | Default for the adapter |
+| `python3` | Python 3 | Standard CPython |
+| `pari_jupyter` | PARI/GP | Number theory |
+| `gap` | GAP | Group theory |
+| `singular` | Singular | Algebraic geometry |
+| `lean4` | Lean 4 | Theorem prover |
+| `octave` | GNU Octave | MATLAB-compatible |
+| `coconut` | Coconut | Pattern matching |
+| `julia-1.10` | Julia 1.10 | Scientific computing |
+
+Pass any of these as `kernel_name` in the `use_notebook` request body.
+
+---
+
+## Setup
+
+### Prerequisites
+
+- Python 3.10+
+- JupyterLab 4.4.x running locally on port 8888 (see JupyterLab Setup above)
+- A SageMath kernel (`sagemath`) installed and available in Jupyter
+
+### Install
+
+```bash
+git clone https://github.com/dzackgarza/jupyter-assistant-api
+cd jupyter-assistant-api
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+### Configure
+
+Set environment variables:
+
+```bash
+export JUPYTER_URL=http://localhost:8888
+export JUPYTER_TOKEN=           # empty if JupyterLab has no auth
+export PORT=4042                 # default: 4042
+```
+
+### Run
+
+```bash
+# Via the console entry point (recommended):
+jupyter-assistant-api
+
+# Or directly with uvicorn:
+uvicorn jupyter_mcp_server.assistant_api:app --host 127.0.0.1 --port 4042 --workers 1
+```
+
+### systemd user services (recommended)
+
+Both long-running pieces — the adapter and the Cloudflare tunnel — are vendored
+as systemd user units in [`dev/systemd/`](dev/systemd). Install them by absolute
+path so systemd symlinks the repo copies and the repo stays the single source of
+truth:
+
+```bash
+systemctl --user enable --now \
+  "$PWD/dev/systemd/jupyter-assistant-api.service" \
+  "$PWD/dev/systemd/jupyter-assistant-tunnel.service"
+
+systemctl --user is-active jupyter-assistant-api jupyter-assistant-tunnel
+```
+
+After editing a vendored unit, `systemctl --user daemon-reload && systemctl --user restart <unit>`.
+
+The units hardcode `/home/dzack` paths — this deployment is single-machine by
+design. Adjust the paths when installing elsewhere. `jupyter-assistant-tunnel`
+reads `~/.cloudflared/config-jupyter-assistant.yml`, which is **not** vendored
+because it names a credentials file; its ingress must point at `127.0.0.1:4042`.
+If that host:port disagrees with the adapter, the public hostname serves
+Cloudflare **error 502**; if the tunnel is not running at all, **error 1033**.
+
+### Verify
+
+```bash
+curl http://127.0.0.1:4042/health
+# {"ok":true,"status":"healthy","jupyter_url":"http://localhost:8888"}
+```
+
+### Logging
+
+The adapter runs as a single uvicorn worker. All logs go to **stdout/stderr** of the terminal (or systemd journal) where uvicorn was started.
+
+#### Where to look
+
+| Scenario | How to check logs |
+|---|---|
+| Running in a terminal | Logs print directly to that terminal |
+| Running in a tmux session | `tmux attach -t <session>` and scroll |
+| systemd user service | `journalctl --user -u jupyter-assistant-api -f` |
+| Piped to file | Start with `jupyter-assistant-api 2>&1 \| tee adapter.log` |
+
+#### What gets logged
+
+**Uvicorn access log** (one line per request):
+```
+INFO:     127.0.0.1:54321 - "POST /v1/notebooks/use HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54321 - "POST /v1/notebooks/nb_cGVyaW9kcy9mZXJtYXQtcGVyaW9kcy5pcHluYg/execute-code HTTP/1.1" 200 OK
+```
+
+**Uvicorn error log** (unhandled exceptions — but the global exception handler catches most):
+```
+ERROR:    Exception in ASGI application
+```
+
+**Upstream tool logs** (kernel operations, notebook reads):
+```
+INFO:jupyter_mcp_server.tools:Executing cell 3 in notebook periods/fermat-periods.ipynb
+INFO:jupyter_mcp_server.tools:Kernel status: busy -> idle
+```
+
+#### Error responses
+
+Every error returns structured JSON with diagnostic context:
 
 ```json
 {
-  "mcpServers": {
-    "jupyter": {
-      "command": "uvx",
-      "args": ["jupyter-mcp-server@latest"],
-      "env": {
-        "JUPYTER_URL": "http://localhost:8888",
-        "JUPYTER_TOKEN": "MY_TOKEN",
-        "ALLOW_IMG_OUTPUT": "true"
-      }
-    }
-  }
+  "ok": false,
+  "error_type": "HTTPException",
+  "error_message": "Failed to start kernel 'bad_kernel': 404 ...",
+  "traceback": "Traceback (most recent call last):\n  ...",
+  "notebook_id": "nb_cGVyaW9kcy9mZXJtYXQtcGVyaW9kcy5pcHluYg",
+  "notebook_path": "periods/fermat-periods.ipynb"
 }
 ```
 
-</details>
+The `traceback` field contains the full Python traceback — useful for debugging kernel connection failures or tool class errors without digging through server logs.
 
-<details>
-<summary><b>🐳 Using Docker (Production)</b></summary>
+#### Log level
 
-**On macOS and Windows:**
+To increase verbosity, pass uvicorn's `--log-level` flag:
+
+```bash
+uvicorn jupyter_mcp_server.assistant_api:app --host 127.0.0.1 --port 4042 --workers 1 --log-level debug
+```
+
+For Python-level debug logging (tool classes, kernel client):
+
+```bash
+JUPYTER_MCP_LOG_LEVEL=debug jupyter-assistant-api
+```
+
+#### systemd service logging
+
+If running as a systemd user service, append to the unit file:
+
+```ini
+[Service]
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jupyter-assistant-api
+```
+
+Then:
+```bash
+# Follow logs in real time:
+journalctl --user -u jupyter-assistant-api -f
+
+# Show last 50 lines:
+journalctl --user -u jupyter-assistant-api -n 50
+
+# Show errors only:
+journalctl --user -u jupyter-assistant-api -p err
+```
+
+---
+
+## Notebook ID Scheme
+
+A notebook path like `periods/fermat-periods.ipynb` becomes:
+
+```
+path:                  periods/fermat-periods.ipynb
+base64(urlsafe):       cGVyaW9kcy9mZXJtYXQtcGVyaW9kcy5pcHluYg==
+stripped padding:      cGVyaW9kcy9mZXJtYXQtcGVyaW9kcy5pcHluYg
+notebook_id:           nb_cGVyaW9kcy9mZXJtYXQtcGVyaW9kcy5pcHluYg
+```
+
+The ID is **not** a secret — only a route-safe representation of the filepath. Decode it with `decode_notebook_id()` from `jupyter_mcp_server.notebook_id`.
+
+---
+
+## Testing
+
+```bash
+pytest tests/test_notebook_id.py tests/test_assistant_api_schema.py -v
+```
+
+Integration tests require a running JupyterLab on port 8888:
+
+```bash
+pytest tests/test_assistant_api_integration.py -v
+```
+
+---
+
+## cloudflared Tunnel
+
+The public endpoint at `https://jupyter-assistant.dzackgarza.com` is served
+through a Cloudflare named tunnel that routes HTTPS traffic to the local
+adapter at `127.0.0.1:4042`.
+
+### 1. Install cloudflared
+
+```bash
+# Debian/Ubuntu
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb
+sudo dpkg -i /tmp/cloudflared.deb
+
+# macOS
+brew install cloudflared
+```
+
+Verify:
+```bash
+cloudflared --version
+# cloudflared version 2026.7.2 (built 20260716-05:07:11)
+```
+
+### 2. Authenticate with Cloudflare
+
+```bash
+cloudflared tunnel login
+# Opens a browser; pick the zone for dzackgarza.com
+# Writes ~/.cloudflared/cert.pem
+```
+
+### 3. Create the named tunnel
+
+```bash
+cloudflared tunnel create jupyter-assistant
+# Outputs tunnel ID: f12f0463-0152-489d-a028-cb7ae016f188
+# Writes ~/.cloudflared/f12f0463-0152-489d-a028-cb7ae016f188.json
+```
+
+### 4. Map the hostname
+
+```bash
+cloudflared tunnel route dns jupyter-assistant jupyter-assistant.dzackgarza.com
+```
+
+### 5. Create the config file
+
+Write `~/.cloudflared/config-jupyter-assistant.yml`:
+
+```yaml
+tunnel: f12f0463-0152-489d-a028-cb7ae016f188
+credentials-file: /home/dzack/.cloudflared/f12f0463-0152-489d-a028-cb7ae016f188.json
+
+ingress:
+  - hostname: jupyter-assistant.dzackgarza.com
+    service: http://127.0.0.1:4042
+  - service: http_status:404
+```
+
+The last rule is a catch-all that returns 404 for unmatched hostnames — required by cloudflared.
+
+### 6. Run the tunnel
+
+```bash
+# Foreground (for testing):
+cloudflared tunnel --config ~/.cloudflared/config-jupyter-assistant.yml run
+
+# Background (detached):
+nohup cloudflared tunnel --config ~/.cloudflared/config-jupyter-assistant.yml run &
+```
+
+### 7. (Optional) Set up as a systemd user service
+
+Create `~/.config/systemd/user/cloudflared-jupyter-assistant.service`:
+
+```ini
+[Unit]
+Description=Cloudflare Tunnel - Jupyter Assistant API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cloudflared tunnel --config /home/dzack/.cloudflared/config-jupyter-assistant.yml run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Then:
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now cloudflared-jupyter-assistant.service
+systemctl --user status cloudflared-jupyter-assistant.service
+```
+
+### Verification
+
+```bash
+curl -s https://jupyter-assistant.dzackgarza.com/health | python3 -m json.tool
+# {
+#     "ok": true,
+#     "status": "healthy",
+#     "jupyter_url": "http://localhost:8888"
+# }
+```
+
+---
+
+## Upstream
+
+This repo is a fork of [datalayer/jupyter-mcp-server](https://github.com/datalayer/jupyter-mcp-server). The MCP server infrastructure (tool classes, notebook manager, kernel client) is preserved; only the transport layer is replaced. Upstream documentation for tool behavior lives at [jupyter-mcp-server.datalayer.tech](https://jupyter-mcp-server.datalayer.tech).
+
+## Error contract
+
+Every failing request returns **HTTP 200** with `ok: false`. The status the
+failure would otherwise have carried is in `http_status`; clients branch on
+`ok`, never on the wire status.
 
 ```json
 {
-  "mcpServers": {
-    "jupyter": {
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "JUPYTER_URL",
-        "-e", "JUPYTER_TOKEN",
-        "-e", "ALLOW_IMG_OUTPUT",
-        "datalayer/jupyter-mcp-server:latest"
-      ],
-      "env": {
-        "JUPYTER_URL": "http://host.docker.internal:8888",
-        "JUPYTER_TOKEN": "MY_TOKEN",
-        "ALLOW_IMG_OUTPUT": "true"
-      }
-    }
-  }
+  "ok": false,
+  "http_status": 404,
+  "error_type": "ToolError",
+  "error_message": "[list_files] ... 404: file or directory '/nope' does not exist",
+  "traceback": "...",
+  "notebook_id": null,
+  "notebook_path": null
 }
 ```
 
-**On Linux:**
-
-```json
-{
-  "mcpServers": {
-    "jupyter": {
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "JUPYTER_URL",
-        "-e", "JUPYTER_TOKEN",
-        "-e", "ALLOW_IMG_OUTPUT",
-        "--network=host",
-        "datalayer/jupyter-mcp-server:latest"
-      ],
-      "env": {
-        "JUPYTER_URL": "http://localhost:8888",
-        "JUPYTER_TOKEN": "MY_TOKEN",
-        "ALLOW_IMG_OUTPUT": "true"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-> [!TIP]
->
-> 1. **Port Configuration**: Ensure the `port` in your Jupyter URLs matches the one used in the `jupyter lab` command. For simplified config, set this in `JUPYTER_URL`.
-> 1. **Server Separation**: Use `JUPYTER_URL` when both services are on the same server, or set individual variables for advanced deployments. The different URL variables exist because some deployments separate notebook storage (`DOCUMENT_URL`) from kernel execution (`RUNTIME_URL`).
-> 1. **Authentication**: In most cases, document and runtime services use the same authentication token. Use `JUPYTER_TOKEN` for simplified config or set `DOCUMENT_TOKEN` and `RUNTIME_TOKEN` individually for different credentials.
-> 1. **Notebook Path**: The `DOCUMENT_ID` parameter specifies the path to the notebook the MCP client default to connect. It should be relative to the directory where JupyterLab was started. If you omit `DOCUMENT_ID`, the MCP client can automatically list all available notebooks on the Jupyter server, allowing you to select one interactively via your prompts.
-> 1. **Image Output**: Set `ALLOW_IMG_OUTPUT` to `false` if your LLM does not support mutimodel understanding.
-
-For detailed instructions on configuring various MCP clients—including [Claude Desktop](https://jupyter-mcp-server.datalayer.tech/clients/claude_desktop), [VS Code](https://jupyter-mcp-server.datalayer.tech/clients/vscode), [Cursor](https://jupyter-mcp-server.datalayer.tech/clients/cursor), [Cline](https://jupyter-mcp-server.datalayer.tech/clients/cline), and [Windsurf](https://jupyter-mcp-server.datalayer.tech/clients/windsurf) — see the [Clients documentation](https://jupyter-mcp-server.datalayer.tech/clients).
-
-## 🧩 Sandbox Variants
-
-By default, code executes through `jupyter-kernel-client` against a Jupyter
-Server (`SANDBOX_VARIANT=jupyter`). Setting `SANDBOX_VARIANT` to any other value
-routes execution through the [code-sandboxes](https://github.com/datalayer/code-sandboxes)
-package via a `SandboxKernel` adapter, so the same notebook tools can run code on
-additional backends.
-
-Sandbox features are provided by the optional `jupyter_mcp_sandboxes` extension.
-To expose sandbox lifecycle tools (`launch_sandbox`, `list_sandboxes`,
-`use_sandbox`, `terminate_sandbox`) or run any non-`jupyter` sandbox variant,
-install it with `pip install jupyter_mcp_sandboxes`.
-
-| Engine                   | `SANDBOX_VARIANT` | Extra install                   | Key variables                                         |
-| ------------------------ | ------------------ | ------------------------------- | ----------------------------------------------------- |
-| Jupyter Server (default) | `jupyter`          | —                               | `JUPYTER_URL`, `JUPYTER_TOKEN`                        |
-| JupyterHub               | `jupyter`          | —                               | `RUNTIME_URL`, `RUNTIME_TOKEN`                        |
-| Datalayer                | `datalayer`        | `jupyter-mcp-server[datalayer]` | `RUNTIME_URL`, `RUNTIME_TOKEN`, `SANDBOX_ENVIRONMENT` |
-| Kaggle                   | `kaggle`           | `jupyter-mcp-server[kaggle]`    | Default batch mode: Kaggle credentials (`KAGGLE_API_TOKEN` or `kaggle.json`). Interactive mode: `RUNTIME_URL` + (`KAGGLE_API_TOKEN`/`RUNTIME_TOKEN` or `RUNTIME_ID`). Optional accelerator: `SANDBOX_GPU`. |
-| Google Colab             | `colab`            | `jupyter-mcp-server[colab]`     | `RUNTIME_URL`, `RUNTIME_ID`, `RUNTIME_PROXY_TOKEN`    |
-| Monty                    | `monty`            | `jupyter-mcp-server[monty]`     | —                                                     |
-| Modal                    | `modal`            | `jupyter-mcp-server[modal]`     | Modal credentials                                     |
-
-### 1. Jupyter Server
-
-The default engine. Point the server at a running Jupyter Server:
-
-```bash
-pip install jupyter-mcp-server
-```
-
-```json
-"env": {
-  "JUPYTER_URL": "http://localhost:8888",
-  "JUPYTER_TOKEN": "MY_TOKEN"
-}
-```
-
-### 2. JupyterHub
-
-JupyterHub uses the same `jupyter` engine, targeting a user's single-user server.
-Authenticate with a JupyterHub API token that has the `access:servers` scope:
-
-```json
-"env": {
-  "RUNTIME_URL": "https://your-jupyterhub.domain/user/<username>",
-  "RUNTIME_TOKEN": "your-jupyterhub-api-token",
-  "DOCUMENT_URL": "https://your-jupyterhub.domain/user/<username>",
-  "DOCUMENT_TOKEN": "your-jupyterhub-api-token"
-}
-```
-
-See the [JupyterHub setup guide](https://jupyter-mcp-server.datalayer.tech/providers/jupyterhub-streamable-http/) for full details.
-
-### 3. Datalayer
-
-Execute on the [Datalayer](https://datalayer.ai) cloud runtime with GPU support
-and persistence:
-
-```bash
-pip install "jupyter-mcp-server[datalayer]"
-```
-
-```json
-"env": {
-  "SANDBOX_VARIANT": "datalayer",
-  "RUNTIME_URL": "https://prod1.datalayer.run",
-  "RUNTIME_TOKEN": "your-datalayer-token",
-  "SANDBOX_ENVIRONMENT": "python-cpu-env"
-}
-```
-
-### 4. Kaggle
-
-Execute against Kaggle. By default, when no runtime URL/channels are provided,
-the server uses the transparent Kaggle **batch** path from `code-sandboxes`.
-If runtime values are provided, it uses Kaggle interactive kernel mode.
-
-```bash
-pip install "jupyter-mcp-server[kaggle]"
-```
-
-```json
-"env": {
-  "SANDBOX_VARIANT": "kaggle",
-  "KAGGLE_API_TOKEN": "...",
-  "SANDBOX_GPU": "T4"
-}
-```
-
-To force interactive runtime mode, provide `RUNTIME_URL` and either:
-
-- `KAGGLE_API_TOKEN` / `RUNTIME_TOKEN` (create kernel), or
-- `RUNTIME_ID` / `RUNTIME_CHANNELS_URL` (connect existing kernel).
-
-Supported Kaggle accelerator values include:
-`NvidiaTeslaP100`, `NvidiaTeslaT4`, `NvidiaTeslaT4Highmem`, `NvidiaL4`,
-`NvidiaL4X1`, `NvidiaTeslaA100`, `NvidiaH100`, and `NvidiaRtxPro6000`.
-Aliases such as `P100` and `T4` are accepted.
-
-> Note: Kaggle free-tier availability usually includes `P100` and `T4`. Other
-> accelerators are commonly restricted to specific competitions or internal
-> Kaggle workloads.
-
-### 5. Google Colab
-
-Execute against a Google Colab runtime. Install the extra and provide the values
-from an active Colab notebook session:
-
-```bash
-pip install "jupyter-mcp-server[colab]"
-```
-
-```json
-"env": {
-  "SANDBOX_VARIANT": "colab",
-  "RUNTIME_URL": "https://8080-m-s-kkb-...-d.us-east1-0.prod.colab.dev",
-  "RUNTIME_ID": "a1b2c3d4-....",
-  "RUNTIME_PROXY_TOKEN": "ya29...."
-}
-```
-
-> The proxy token (`colab-runtime-proxy-token`) is short-lived; refresh it when it
-> expires.
-
-You can also pass `RUNTIME_CHANNELS_URL` with the Colab channels WebSocket URL
-and let the server derive `RUNTIME_URL` and `RUNTIME_ID`.
-
-### 6. Monty
-
-Execute in [Monty](https://github.com/pydantic/monty), a secure in-process Python
-interpreter — ideal for short, safe LLM snippets. No credentials required.
-
-```bash
-pip install "jupyter-mcp-server[monty]"
-```
-
-```json
-"env": {
-  "SANDBOX_VARIANT": "monty"
-}
-```
-
-> Monty supports only a subset of Python; third-party libraries and rich display
-> outputs are not available.
-
-### 7. Modal
-
-Execute in a [Modal](https://modal.com/docs/guide) cloud sandbox. Install the
-extra and configure Modal credentials:
-
-```bash
-pip install "jupyter-mcp-server[modal]"
-modal token new
-```
-
-For local development, `modal token new` is usually enough because the Modal SDK
-loads credentials from `~/.modal.toml`.
-
-If you run in CI/CD, containers, or hosted runners, set both environment
-variables below.
-
-```json
-"env": {
-  "SANDBOX_VARIANT": "modal",
-  "MODAL_TOKEN_ID": "ak-...",
-  "MODAL_TOKEN_SECRET": "as-..."
-}
-```
-
-Why both variables? Modal uses a token pair for environment-based auth:
-
-- `MODAL_TOKEN_ID`: public token identifier.
-- `MODAL_TOKEN_SECRET`: secret half paired with that id.
-
-Providing only one is insufficient for authentication.
-
-If needed, export both values from your local Modal config:
-
-```bash
-python - <<'PY'
-import pathlib
-import tomllib
-
-cfg = tomllib.loads(pathlib.Path("~/.modal.toml").expanduser().read_text())
-profile = cfg.get("default", cfg)
-token_id = profile.get("token_id")
-token_secret = profile.get("token_secret")
-if token_id and token_secret:
-    print(f"export MODAL_TOKEN_ID={token_id}")
-    print(f"export MODAL_TOKEN_SECRET={token_secret}")
-else:
-    raise SystemExit("Could not find token_id/token_secret in ~/.modal.toml")
-PY
-```
-
-> You can also select the engine on the command line with
-> `--sandbox-variant`, `--runtime-proxy-token`, and `--sandbox-environment`.
-
-## 🧪 Testing
-
-Run the test suite:
-
-```bash
-pytest tests/
-```
-
-Required environment variables for tests:
-
-- None for the default local suite.
-
-Optional environment variables:
-
-- `TEST_MCP_SERVER`: `true`/`false` toggle for standalone MCP server mode tests (default `true`).
-- `TEST_JUPYTER_SERVER`: `true`/`false` toggle for Jupyter extension mode tests (default `true`).
-- `DATALAYER_API_KEY`: required only for Datalayer cloud smoke/integration tests.
-- `DATALAYER_RUN_URL`: optional custom Datalayer runtime URL for datalayer engine tests.
-- `SANDBOX_ENVIRONMENT`: optional cloud environment override (for example `ai-agents-env`).
-
-## ✅ Best Practices
-
-- Interact with LLMs that supports multimodal input (like Gemini 2.5 Pro) to fully utilize advanced multimodal understanding capabilities.
-- Use a MCP client that supports returning image data and can parse it (like Cursor, Gemini CLI, etc.), as some clients may not support this feature.
-- Break down complex task (like the whole data science workflow) into multiple sub-tasks (like data cleaning, feature engineering, model training, model evaluation, etc.) and execute them step-by-step.
-- Provide clearly structured prompts and rules (👉 Visit our [Prompt Templates](prompt/README.md) to get started)
-- Provide as much context as possible (like already installed packages, field explanations for existing datasets, current working directory, detailed task requirements, etc.).
-
-## 🤝 Contributing
-
-We welcome contributions of all kinds! Here are some examples:
-
-- 🐛 Bug fixes
-- 📝 Improvements to existing features
-- 🔧 New feature development
-- 📚 Documentation improvements and prompt templates
-
-For detailed instructions on how to get started with development and submit your contributions, please see our [**Contributing Guide**](CONTRIBUTING.md).
-
-### Our Contributors
-
-[![Contributors](https://contrib.rocks/image?repo=datalayer/jupyter-mcp-server)](https://github.com/datalayer/jupyter-mcp-server/graphs/contributors)
-
-## 📚 Resources
-
-Looking for blog posts, videos, or other materials about Jupyter MCP Server?
-
-👉 Visit the [**Resources section**](https://jupyter-mcp-server.datalayer.tech/resources) in our documentation for more!
-
-[![Star History Chart](https://api.star-history.com/svg?repos=datalayer/jupyter-mcp-server&type=Date)](https://star-history.com/#datalayer/jupyter-mcp-server&type=Date)
-
-______________________________________________________________________
-
-<div align="center">
-
-**If this project is helpful to you, please give us a ⭐️**
-
-Made with ❤️ by [Datalayer](https://github.com/datalayer)
-
-</div>
+This is deliberate. The consumer is a GPT Action whose HTTP client calls
+`raise_for_status()`, so on any non-2xx it raises and shows the caller only
+the exception type (`ClientResponseError: <class 'aiohttp...'>`) — the
+response body, and every diagnostic in it, is discarded before the model sees
+it. Returning 200 is what makes failures readable to the only thing reading
+them.
+
+`http_status` carries the real cause: a Jupyter-boundary status is propagated
+from the exception chain (404 for a missing path) rather than flattened to
+500, so a caller can distinguish "wrong path" from "server fault".
+
+### Sage kernel
+
+`.envrc` prepends `dev/jupyter` to `JUPYTER_PATH`, which shadows the system
+`sagemath` kernelspec with one whose `argv` uses `sage --python`. The system
+spec uses a bare `python`, resolved from the launching process's PATH, so a
+Jupyter server started under this project's `.venv` gets an interpreter that
+cannot `import sage`; the kernel then crash-loops and the websocket handshake
+fails with an opaque 500. Run `direnv allow` once after cloning.

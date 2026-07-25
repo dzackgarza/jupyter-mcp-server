@@ -111,7 +111,11 @@ class AssistantRuntime:
         """
         path = decode_notebook_id(notebook_id)
 
-        if notebook_id in self.notebooks:
+        # Create mode must reach UseNotebookTool even when the id is already
+        # known: only the tool checks whether the file is still on disk, and
+        # short-circuiting here reports a successful create for a notebook
+        # that may have been deleted underneath us.
+        if notebook_id in self.notebooks and not create:
             self.notebooks.set_current_notebook(notebook_id)
             return path
 

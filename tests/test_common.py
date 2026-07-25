@@ -318,9 +318,9 @@ class MCPClient:
 
             return result
         except Exception as e:
-            # Log the error but return None for test compatibility (JUPYTER_SERVER mode)
-            logging.warning(f"Tool {tool_name} raised error: {e}")
-            return None
+            # Do not mask real exceptions (like ClientResponseError) in tests
+            logging.error(f"Tool {tool_name} raised error: {e}", exc_info=True)
+            raise
 
     @requires_session
     async def list_tools(self):
