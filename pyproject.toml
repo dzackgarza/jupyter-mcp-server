@@ -63,6 +63,7 @@ typing = ["mypy>=0.990"]
 [project.scripts]
 jupyter-mcp = "jupyter_mcp_server.cli.cli:serve"
 jupyter-mcp-server = "jupyter_mcp_server.cli.cli:serve"
+jupyter-assistant-api = "jupyter_mcp_server.assistant_api:main"
 
 [project.license]
 file = "LICENSE"
