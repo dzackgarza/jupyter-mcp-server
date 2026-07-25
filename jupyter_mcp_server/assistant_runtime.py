@@ -94,12 +94,14 @@ class AssistantRuntime:
         notebook_id: str,
         *,
         create: bool = False,
+        kernel_id: str | None = None,
     ) -> str:
         """Make ``notebook_id`` the current notebook.
 
         If the notebook is already managed, just set it current.
         Otherwise invoke ``UseNotebookTool.execute`` in connect or create
-        mode.  Returns the normalized notebook path.
+        mode.  If ``kernel_id`` is provided, ``UseNotebookTool`` connects
+        to that pre-started kernel instead of starting a new one.
 
         Raises
         ------
@@ -115,21 +117,23 @@ class AssistantRuntime:
 
         config = get_config()
 
-        result = await safe_notebook_operation(
-            lambda: UseNotebookTool().execute(
-                mode=self.context.mode,
-                server_client=self.context.server_client,
-                contents_manager=self.context.contents_manager,
-                kernel_manager=self.context.kernel_manager,
-                kernel_spec_manager=self.context.kernel_spec_manager,
-                notebook_manager=self.notebooks,
-                notebook_name=notebook_id,
-                notebook_path=path,
-                use_mode="create" if create else "connect",
-                runtime_url=(config.runtime_url if config.runtime_url != "local" else None),
-                runtime_token=config.runtime_token,
-            )
-        )
+        kwargs: dict[str, Any] = {
+            "mode": self.context.mode,
+            "server_client": self.context.server_client,
+            "contents_manager": self.context.contents_manager,
+            "kernel_manager": self.context.kernel_manager,
+            "kernel_spec_manager": self.context.kernel_spec_manager,
+            "notebook_manager": self.notebooks,
+            "notebook_name": notebook_id,
+            "notebook_path": path,
+            "use_mode": "create" if create else "connect",
+            "runtime_url": (config.runtime_url if config.runtime_url != "local" else None),
+            "runtime_token": config.runtime_token,
+        }
+        if kernel_id is not None:
+            kwargs["kernel_id"] = kernel_id
+
+        result = await safe_notebook_operation(lambda: UseNotebookTool().execute(**kwargs))
 
         # Existing tools generally report domain errors as strings.
         # Manager membership is the reliable success test.

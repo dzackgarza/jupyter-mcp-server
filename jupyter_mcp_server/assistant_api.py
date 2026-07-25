@@ -93,6 +93,10 @@ async def _startup_configure_jupyter() -> None:
 class UseNotebookRequest(BaseModel):
     notebook_path: str = Field(..., description="Jupyter-root-relative path ending in .ipynb")
     mode: Literal["connect", "create"] = Field("connect", description="Open existing or create new")
+    kernel_name: str = Field(
+        "sagemath",
+        description="Kernelspec name (e.g. sagemath, python3, pari_jupyter, gap, singular, lean4, octave, coconut, julia-1.10). Default: sagemath.",
+    )
 
 
 class InsertCellRequest(BaseModel):
@@ -168,6 +172,7 @@ class UseNotebookResponse(BaseModel):
     notebook_id: str
     notebook_path: str
     kernel_id: str | None = None
+    kernel_name: str | None = None
     mode: str
 
 
@@ -260,6 +265,48 @@ def _envelope(notebook_id: str, path: str, **extra: Any) -> dict[str, Any]:
     return env
 
 
+async def _start_kernel_with_spec(kernel_name: str) -> str:
+    """Start a kernel with the given kernelspec name via the Jupyter REST API.
+
+    The upstream ``UseNotebookTool`` accepts a pre-existing ``kernel_id``
+    and connects to it instead of starting a new one.  This helper bridges
+    the gap: it starts the kernel with the desired kernelspec via the
+    Jupyter server's REST API, then returns the kernel id for
+    ``UseNotebookTool`` to connect to.
+
+    Returns
+    -------
+    str
+        The kernel id of the newly started kernel.
+
+    Raises
+    ------
+    HTTPException
+        If the kernel could not be started (HTTP 400).
+    """
+    import httpx
+
+    config = get_config()
+    base_url = config.runtime_url or "http://localhost:8888"
+    token = config.runtime_token
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{base_url}/api/kernels",
+            json={"name": kernel_name},
+            headers={} if not token else {"Authorization": f"token {token}"},
+        )
+
+    if resp.status_code != 201:
+        detail = resp.text[:500]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to start kernel '{kernel_name}': {resp.status_code} {detail}",
+        )
+
+    return resp.json()["id"]
+
+
 # ---------------------------------------------------------------------------
 # Routes — server-level
 # ---------------------------------------------------------------------------
@@ -338,23 +385,39 @@ async def list_notebooks() -> Any:
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
 async def use_notebook(request: UseNotebookRequest) -> dict[str, Any]:
-    """Open or create a notebook and return its deterministic ID."""
+    """Open or create a notebook and return its deterministic ID.
+
+    A kernel is started with the given ``kernel_name`` (default
+    ``sagemath``) and bound to the notebook.  Available kernelspecs can
+    be listed via ``list_kernels`` or the Jupyter server's
+    ``/api/kernelspecs`` endpoint.
+    """
     try:
         notebook_id = encode_notebook_id(request.notebook_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Pre-start a kernel with the requested kernelspec, then pass its
+    # kernel_id to UseNotebookTool so it connects to it instead of
+    # starting a new one with the default (python3) kernelspec.
+    kernel_id = await _start_kernel_with_spec(request.kernel_name)
+
     async with runtime.lock:
         try:
-            path = await runtime.activate(notebook_id, create=(request.mode == "create"))
+            path = await runtime.activate(
+                notebook_id,
+                create=(request.mode == "create"),
+                kernel_id=kernel_id,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        kernel_id = runtime.notebooks.get_kernel_id(notebook_id)
+        actual_kernel_id = runtime.notebooks.get_kernel_id(notebook_id)
         return _envelope(
             notebook_id,
             path,
-            kernel_id=kernel_id,
+            kernel_id=actual_kernel_id,
+            kernel_name=request.kernel_name,
             mode=request.mode,
         )
 
