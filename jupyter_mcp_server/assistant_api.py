@@ -39,7 +39,6 @@ from jupyter_mcp_server.tools import (
     InsertCellTool,
     ListFilesTool,
     ListKernelsTool,
-    ListNotebooksTool,
     MoveCellTool,
     OverwriteCellSourceTool,
     ReadCellTool,
@@ -408,16 +407,33 @@ async def list_kernels() -> Any:
     return {"ok": True, "result": result}
 
 
-@app.get(
-    "/v1/notebooks/managed", operation_id="list_notebooks", response_model=GenericResultResponse
-)
-async def list_notebooks() -> Any:
-    """List notebooks currently registered in the in-process NotebookManager.
+@app.get("/v1/notebooks", operation_id="list_notebooks", response_model=GenericResultResponse)
+async def list_notebooks(
+    path: str = "",
+    max_depth: int = 1,
+    start_index: int = 0,
+    limit: int = 50,
+) -> Any:
+    """List notebook files on the Jupyter server under the given path.
 
-    Diagnostic only — for notebook discovery on the Jupyter server, call
-    ``list_files`` with ``pattern=*.ipynb``.
+    Returns every ``*.ipynb`` file found.  Each entry includes the
+    notebook path (relative to the Jupyter root), which can be passed
+    directly to ``use_notebook`` as ``notebook_path``.
+
+    Defaults to ``max_depth=1`` (current directory only).  Increase
+    ``max_depth`` or set ``path`` to a subdirectory to search deeper.
     """
-    result = await safe_notebook_operation(lambda: ListNotebooksTool().execute(**_ctx()))
+    result = await safe_notebook_operation(
+        lambda: ListFilesTool().execute(
+            **_ctx(
+                path=path,
+                max_depth=max_depth,
+                start_index=start_index,
+                limit=limit,
+                pattern="*.ipynb",
+            )
+        )
+    )
     return {"ok": True, "result": result}
 
 
