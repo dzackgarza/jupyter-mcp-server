@@ -410,7 +410,7 @@ async def list_kernels() -> Any:
 @app.get("/v1/notebooks", operation_id="list_notebooks", response_model=GenericResultResponse)
 async def list_notebooks(
     path: str = "",
-    max_depth: int = 1,
+    max_depth: int = 10,
     start_index: int = 0,
     limit: int = 50,
 ) -> Any:
@@ -419,9 +419,6 @@ async def list_notebooks(
     Returns every ``*.ipynb`` file found.  Each entry includes the
     notebook path (relative to the Jupyter root), which can be passed
     directly to ``use_notebook`` as ``notebook_path``.
-
-    Defaults to ``max_depth=1`` (current directory only).  Increase
-    ``max_depth`` or set ``path`` to a subdirectory to search deeper.
     """
     result = await safe_notebook_operation(
         lambda: ListFilesTool().execute(
