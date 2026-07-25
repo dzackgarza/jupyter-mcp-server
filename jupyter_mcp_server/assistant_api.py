@@ -46,7 +46,11 @@ from jupyter_mcp_server.tools import (
     ReadNotebookTool,
     RestartNotebookTool,
 )
-from jupyter_mcp_server.utils import safe_notebook_operation
+from jupyter_mcp_server.utils import (
+    safe_extract_outputs,
+    safe_notebook_operation,
+    wait_for_kernel_idle,
+)
 
 # ---------------------------------------------------------------------------
 # App + runtime
@@ -590,6 +594,8 @@ async def execute_code(
                     code=request.code,
                     timeout=request.timeout,
                     ensure_kernel_alive_fn=runtime.ensure_kernel_alive,
+                    wait_for_kernel_idle_fn=wait_for_kernel_idle,
+                    safe_extract_outputs_fn=safe_extract_outputs,
                 )
             ),
         )
