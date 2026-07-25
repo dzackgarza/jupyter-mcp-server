@@ -74,6 +74,54 @@ runtime = AssistantRuntime()
 _CONSEQUENTIAL_FALSE: dict[str, Any] = {"x-openai-isConsequential": False}
 
 
+# ---------------------------------------------------------------------------
+# Error handling
+# ---------------------------------------------------------------------------
+
+
+class ErrorResponse(BaseModel):
+    ok: bool = False
+    error_type: str
+    error_message: str
+    traceback: str | None = None
+    notebook_id: str | None = None
+    notebook_path: str | None = None
+
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch all unhandled exceptions and return structured error JSON.
+
+    Without this, FastAPI's default handler returns a bare
+    'Internal Server Error' string with zero diagnostic context, which
+    leaves the GPT (and the user) unable to understand what went wrong.
+    """
+    import traceback as tb_mod
+
+    # Extract notebook_id from path params if present
+    notebook_id = None
+    notebook_path = None
+    path_params = request.path_params
+    if "notebook_id" in path_params:
+        notebook_id = path_params["notebook_id"]
+        try:
+            notebook_path = decode_notebook_id(notebook_id)
+        except Exception:
+            pass
+
+    tb_str = tb_mod.format_exc()
+    return JSONResponse(
+        status_code=500,
+        content=ErrorResponse(
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            traceback=tb_str,
+            notebook_id=notebook_id,
+            notebook_path=notebook_path,
+        ).model_dump(),
+    )
+
+
 @app.on_event("startup")
 async def _startup_configure_jupyter() -> None:
     """Configure the fixed Jupyter server when the app starts.
