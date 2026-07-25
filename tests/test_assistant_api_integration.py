@@ -481,13 +481,18 @@ async def test_8_failed_activation_returns_client_error(client: AsyncClient) -> 
     assert body["http_status"] == HTTPStatus.NOT_FOUND, resp.text
 
     # The real notebook must still be operable — the failed call must not
-    # have corrupted the current-notebook state.
-    r = await client.post(
-        f"/v1/notebooks/{real_id}/execute-code",
-        json={"code": "print(guard)", "timeout": 10},
-    )
-    assert r.status_code == 200
-    assert "real" in str(r.json()["outputs"])
+    # have corrupted the current-notebook state.  Use a fresh connection
+    # pool: whether the error response above leaves the pooled connection
+    # reusable is httpx/uvicorn keep-alive behaviour, not a claim this API
+    # owns, and reusing it conflates the two.  `guard` surviving proves both
+    # that the notebook is still current and that its kernel is the same one.
+    async with AsyncClient(base_url=str(client.base_url), timeout=60) as fresh:
+        r = await fresh.post(
+            f"/v1/notebooks/{real_id}/execute-code",
+            json={"code": "print(guard)", "timeout": 10},
+        )
+    assert r.json()["ok"] is True, r.text
+    assert "real" in str(r.json()["outputs"]), r.text
 
 
 # ---------------------------------------------------------------------------
