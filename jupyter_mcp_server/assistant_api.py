@@ -67,6 +67,17 @@ runtime = AssistantRuntime()
 _CONSEQUENTIAL_FALSE: dict[str, Any] = {"x-openai-isConsequential": False}
 
 
+@app.on_event("startup")
+async def _startup_configure_jupyter() -> None:
+    """Configure the fixed Jupyter server when the app starts.
+
+    This is needed when the app is launched via ``uvicorn`` module import
+    rather than the ``main()`` entry point (e.g. during development or
+    when run by a process manager that invokes uvicorn directly).
+    """
+    configure_jupyter()
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
