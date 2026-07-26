@@ -4,6 +4,7 @@
 
 """Use notebook tool implementation."""
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Literal
@@ -17,6 +18,11 @@ from jupyter_mcp_server.notebook_manager import NotebookManager
 from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
 
 logger = logging.getLogger(__name__)
+
+# Maximum seconds to wait for a kernel WebSocket handshake before returning a
+# structured error.  Must be well under Cloudflare's 100 s proxy timeout so
+# the application can emit a meaningful response instead of a bare 524.
+_KERNEL_START_TIMEOUT_SECONDS = 30
 
 
 class UseNotebookTool(BaseTool):
@@ -364,13 +370,31 @@ class UseNotebookTool(BaseTool):
                         f"    - Use list_kernels to see available kernel IDs.\n"
                         f"    - Omit kernel_id to start a new kernel automatically."
                     )
-                print(f"DEBUG KERNEL START: url={runtime_url}, token={runtime_token}, id={kernel_id}", flush=True)
                 kernel = KernelClient(
-                    server_url=runtime_url, token=runtime_token, kernel_id=kernel_id, client_kwargs={"reconnect_interval": 1.0}
+                    server_url=runtime_url,
+                    token=runtime_token,
+                    kernel_id=kernel_id,
+                    client_kwargs={"reconnect_interval": 1.0},
                 )
-                # FIXED: Ensure kernel is started with the same path as the notebook
-                kernel.start(path=notebook_path)
-                print(f"DEBUG KERNEL STARTED: connection_ready={getattr(kernel._manager.client, 'connection_ready', 'MISSING')}", flush=True)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(kernel.start, path=notebook_path),
+                        timeout=_KERNEL_START_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise ToolError(
+                        f"[use_notebook] Kernel start timed out after "
+                        f"{_KERNEL_START_TIMEOUT_SECONDS}s for '{notebook_path}'.\n"
+                        f"  runtime_url: {runtime_url}\n"
+                        f"  kernel_id: {kernel_id or '(new — SageMath startup too slow)'}\n"
+                        f"  The kernel WebSocket handshake did not complete in time.\n"
+                        f"  Suggestions:\n"
+                        f"    - Call list_kernels and pass an already-running kernel's "
+                        f"id as kernel_id to skip startup entirely.\n"
+                        f"    - Retry; the server may be transiently overloaded.\n"
+                        f"    - Check Jupyter server health if retries keep failing.",
+                        status_code=504,
+                    ) from exc
 
                 info_list.append(f"[INFO] Connected to kernel '{kernel.id}'.")
             elif mode == ServerMode.JUPYTER_SERVER and kernel_manager is not None:
