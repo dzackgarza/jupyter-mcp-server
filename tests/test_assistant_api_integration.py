@@ -250,6 +250,26 @@ async def test_2_read_notebook_by_id(client: AsyncClient) -> None:
     assert "result" in data
 
 
+async def test_list_notebooks_includes_created_notebook(
+    client: AsyncClient,
+) -> None:
+    created = await client.post(
+        "/v1/notebooks/use",
+        json={
+            "notebook_path": "test-create.ipynb",
+            "mode": "create",
+            "kernel_name": "python3",
+        },
+    )
+    assert created.json()["ok"] is True, created.text
+
+    listed = await client.get("/v1/notebooks")
+    body = listed.json()
+    assert body["ok"] is True, listed.text
+    assert isinstance(body["result"], str)
+    assert "test-create.ipynb" in body["result"]
+
+
 async def test_notebook_status_reports_persisted_state_without_a_session(
     client: AsyncClient,
     jupyter_server: str,
