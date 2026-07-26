@@ -19,9 +19,12 @@ Run one Uvicorn worker.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +41,24 @@ from jupyter_mcp_server.utils import (
 )
 
 __all__ = ["AssistantRuntime", "configure_jupyter"]
+
+_request_id: ContextVar[str] = ContextVar("assistant_request_id", default="-")
+diagnostic_logger = logging.getLogger("uvicorn.error")
+
+
+def bind_request_id(request_id: str) -> Token[str]:
+    """Bind one HTTP request ID to logs emitted below the route layer."""
+    return _request_id.set(request_id)
+
+
+def reset_request_id(token: Token[str]) -> None:
+    """Restore the request context after an HTTP response."""
+    _request_id.reset(token)
+
+
+def current_request_id() -> str:
+    """Return the active HTTP request ID for structured diagnostics."""
+    return _request_id.get()
 
 
 @dataclass
@@ -90,6 +111,42 @@ class AssistantRuntime:
             lock = asyncio.Lock()
             self._notebook_locks[notebook_id] = lock
         return lock
+
+    @asynccontextmanager
+    async def operation_lock(self, notebook_id: str):
+        """Acquire one notebook lock with correlated wait/hold diagnostics."""
+        lock = self.lock_for(notebook_id)
+        kernel_id = self.notebooks.get_kernel_id(notebook_id)
+        wait_started = time.monotonic()
+        diagnostic_logger.info(
+            "assistant_lock_wait request_id=%s notebook_id=%s kernel_id=%s locked=%s",
+            current_request_id(),
+            notebook_id,
+            kernel_id,
+            lock.locked(),
+        )
+        await lock.acquire()
+        acquired_at = time.monotonic()
+        diagnostic_logger.info(
+            "assistant_lock_acquired request_id=%s notebook_id=%s kernel_id=%s "
+            "wait_seconds=%.3f",
+            current_request_id(),
+            notebook_id,
+            kernel_id,
+            acquired_at - wait_started,
+        )
+        try:
+            yield
+        finally:
+            lock.release()
+            diagnostic_logger.info(
+                "assistant_lock_released request_id=%s notebook_id=%s kernel_id=%s "
+                "hold_seconds=%.3f",
+                current_request_id(),
+                notebook_id,
+                self.notebooks.get_kernel_id(notebook_id),
+                time.monotonic() - acquired_at,
+            )
 
     # ------------------------------------------------------------------
     # Kernel health
@@ -178,7 +235,7 @@ class AssistantRuntime:
         create: bool = False,
     ) -> tuple[str, Any]:
         """Activate ``notebook_id`` under its lock, then run ``operation``."""
-        async with self.lock_for(notebook_id):
+        async with self.operation_lock(notebook_id):
             path = await self.activate(notebook_id, create=create)
             result = await safe_notebook_operation(operation)
             return path, result
@@ -259,6 +316,14 @@ class AssistantRuntime:
             responsive = await asyncio.to_thread(_request_kernel_info)
         except Exception:
             responsive = False
+        diagnostic_logger.info(
+            "assistant_kernel_probe request_id=%s notebook_id=%s kernel_id=%s "
+            "responsive=%s probe=control_kernel_info",
+            current_request_id(),
+            notebook_id,
+            kernel_id,
+            responsive,
+        )
         if responsive:
             return True, "Kernel control channel answered kernel_info_request."
         return False, (
@@ -339,6 +404,15 @@ class AssistantRuntime:
             started_at=time.monotonic(),
         )
         self.pending_executions[notebook_id] = pending
+        diagnostic_logger.info(
+            "assistant_execution_started request_id=%s notebook_id=%s kernel_id=%s "
+            "operation=%s handoff_seconds=%s",
+            current_request_id(),
+            notebook_id,
+            self.notebooks.get_kernel_id(notebook_id),
+            operation_name,
+            handoff_after_seconds,
+        )
 
         try:
             await asyncio.wait_for(

@@ -18,9 +18,11 @@ mutation endpoints so the GPT can use "always allow" behavior.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import time
+import uuid
 from typing import Any, Literal
 
 import nbformat
@@ -33,7 +35,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from jupyter_mcp_server.assistant_runtime import (
     AssistantRuntime,
+    bind_request_id,
     configure_jupyter,
+    current_request_id,
+    reset_request_id,
 )
 from jupyter_mcp_server.config import get_config
 from jupyter_mcp_server.notebook_id import decode_notebook_id, encode_notebook_id
@@ -77,6 +82,7 @@ app = FastAPI(
 )
 
 runtime = AssistantRuntime()
+logger = logging.getLogger("uvicorn.error")
 DEFAULT_KERNEL_NAME = "sagemath"
 KERNEL_READY_TIMEOUT_SECONDS = 30
 
@@ -96,6 +102,7 @@ class ErrorResponse(BaseModel):
     traceback: str | None = None
     notebook_id: str | None = None
     notebook_path: str | None = None
+    request_id: str | None = None
 
 
 def _describe(exc: BaseException) -> str:
@@ -175,17 +182,51 @@ def _error_json(request: Request, exc: BaseException, status_code: int) -> JSONR
             ),
             notebook_id=notebook_id,
             notebook_path=notebook_path,
+            request_id=current_request_id(),
         ).model_dump(),
     )
 
 
 @app.middleware("http")
 async def _contain_unexpected_route_failures(request: Request, call_next):
-    """Return the GPT-readable envelope without leaking an ASGI exception."""
+    """Correlate request lifecycle and contain failures in one envelope."""
+    supplied_request_id = request.headers.get("X-Request-ID", "")
+    request_id = (
+        supplied_request_id
+        if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied_request_id)
+        else uuid.uuid4().hex
+    )
+    token = bind_request_id(request_id)
+    started_at = time.monotonic()
+    notebook_match = re.match(r"^/v1/notebooks/(nb_[^/]+)(?:/|$)", request.url.path)
+    notebook_id = notebook_match.group(1) if notebook_match else None
+    logger.info(
+        "assistant_request_start request_id=%s method=%s path=%s notebook_id=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        notebook_id,
+    )
     try:
-        return await call_next(request)
-    except Exception as exc:
-        return _error_json(request, exc, _boundary_status(exc) or 500)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            response = _error_json(request, exc, _boundary_status(exc) or 500)
+        response.headers["X-Request-ID"] = request_id
+        logger.info(
+            "assistant_request_end request_id=%s method=%s path=%s notebook_id=%s "
+            "kernel_id=%s wire_status=%s elapsed_seconds=%.3f",
+            request_id,
+            request.method,
+            request.url.path,
+            notebook_id,
+            runtime.notebooks.get_kernel_id(notebook_id) if notebook_id else None,
+            response.status_code,
+            time.monotonic() - started_at,
+        )
+        return response
+    finally:
+        reset_request_id(token)
 
 
 @app.exception_handler(Exception)
@@ -946,13 +987,26 @@ async def _validate_notebook_for_mutation(notebook_id: str) -> str:
 @app.get("/health", operation_id="health", response_model=HealthResponse)
 async def health() -> dict[str, Any]:
     """Report API and Jupyter server readiness."""
+    import httpx
+
+    base_url, headers = _jupyter_connection()
     try:
-        # Touch ServerContext to force initialization; if Jupyter is
-        # unreachable this raises.
-        _ = runtime.context.mode
-        return {"ok": True, "status": "healthy", "jupyter_url": get_config().runtime_url}
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(f"{base_url}/api/status", headers=headers)
+            response.raise_for_status()
+            status = response.json()
+        if not isinstance(status, dict) or "started" not in status:
+            raise RuntimeError(
+                f"Jupyter returned an invalid /api/status payload: {type(status).__name__}"
+            )
+        return {"ok": True, "status": "healthy", "jupyter_url": base_url}
     except Exception as exc:
-        return {"ok": False, "status": "unhealthy", "error": str(exc)}
+        return {
+            "ok": False,
+            "status": "unhealthy",
+            "jupyter_url": base_url,
+            "error": f"Jupyter probe {base_url}/api/status failed: {type(exc).__name__}: {exc}",
+        }
 
 
 @app.get("/v1/files", operation_id="list_files", response_model=GenericResultResponse)
@@ -974,6 +1028,10 @@ async def list_files(
             pattern=pattern,
         )
     )
+    if not isinstance(result, str) or not result.strip():
+        raise RuntimeError(
+            "list_notebooks returned no result after the Jupyter filesystem scan."
+        )
     return {"ok": True, "result": result}
 
 
@@ -1042,7 +1100,7 @@ async def use_notebook(request: UseNotebookRequest) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    async with runtime.lock_for(notebook_id):
+    async with runtime.operation_lock(notebook_id):
         await _ensure_notebook_file(
             request.notebook_path,
             create=(request.mode == "create"),
@@ -1643,7 +1701,7 @@ async def restart_notebook(
 
     kernel_name = request.kernel_name if request is not None else "sagemath"
     try:
-        async with runtime.lock_for(notebook_id):
+        async with runtime.operation_lock(notebook_id):
             path = decode_notebook_id(notebook_id)
             kernel_id, session_id = await _replace_session_kernel(path, kernel_name)
             if recovering_unresponsive:
@@ -1690,7 +1748,7 @@ async def unuse_notebook(notebook_id: str) -> dict[str, Any]:
         )
     path = decode_notebook_id(notebook_id)
     kernel_id = runtime.notebooks.get_kernel_id(notebook_id)
-    async with runtime.lock_for(notebook_id):
+    async with runtime.operation_lock(notebook_id):
         result = await safe_notebook_operation(
             lambda: UnuseNotebookTool().execute(
                 **_ctx(notebook_name=notebook_id)

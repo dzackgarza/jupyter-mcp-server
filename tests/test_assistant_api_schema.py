@@ -63,7 +63,10 @@ def _api_routes() -> list[APIRoute]:
 
 
 @pytest.mark.asyncio
-async def test_unexpected_route_failure_is_contained(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_unexpected_route_failure_is_contained(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """An unexpected route crash must remain a wire-200 GPT error envelope."""
 
     def crash(_notebook_id: str) -> tuple[str, dict[str, object]]:
@@ -80,6 +83,14 @@ async def test_unexpected_route_failure_is_contained(monkeypatch: pytest.MonkeyP
     assert body["http_status"] == 500
     assert body["error_type"] == "RuntimeError"
     assert "unexpected execution-status failure" in body["error_message"]
+    request_id = response.headers["X-Request-ID"]
+    assert body["request_id"] == request_id
+    assert any(
+        "assistant_request_end" in record.message
+        and f"request_id={request_id}" in record.message
+        and "notebook_id=nb_test" in record.message
+        for record in caplog.records
+    )
 
 
 def test_openapi_document_generates() -> None:
