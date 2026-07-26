@@ -11,6 +11,7 @@ import uuid
 import pytest
 import requests
 from jupyter_kernel_client import KernelClient
+from jupyter_nbmodel_client import NbModelClient, get_notebook_websocket_url
 
 from jupyter_mcp_server.notebook_manager import NotebookManager
 from jupyter_mcp_server.tools._base import ServerMode
@@ -71,24 +72,38 @@ async def test_timed_out_rtc_execution_keeps_pycrdt_on_its_owning_thread(jupyter
         path=notebook_path,
     )
 
-    try:
-        outputs = await ExecuteCellTool().execute(
-            mode=ServerMode.MCP_SERVER,
-            notebook_manager=notebooks,
-            cell_index=0,
-            timeout_seconds=10,
-            ensure_kernel_alive_fn=lambda: kernel,
-        )
-        assert "thread-safe output" in "\n".join(str(output) for output in outputs)
+    browser_ws_url = get_notebook_websocket_url(
+        server_url=jupyter_server,
+        token=JUPYTER_TOKEN,
+        path=notebook_path,
+    )
 
-        await ExecuteCellTool().execute(
-            mode=ServerMode.MCP_SERVER,
-            notebook_manager=notebooks,
-            cell_index=1,
-            timeout_seconds=1,
-            ensure_kernel_alive_fn=lambda: kernel,
-        )
-        gc.collect()
+    try:
+        async with NbModelClient(browser_ws_url) as browser_notebook:
+            outputs = await ExecuteCellTool().execute(
+                mode=ServerMode.MCP_SERVER,
+                notebook_manager=notebooks,
+                cell_index=0,
+                timeout_seconds=10,
+                ensure_kernel_alive_fn=lambda: kernel,
+            )
+            assert "thread-safe output" in "\n".join(str(output) for output in outputs)
+
+            for _ in range(50):
+                browser_outputs = browser_notebook[0].get("outputs", [])
+                if "thread-safe output" in str(browser_outputs):
+                    break
+                await asyncio.sleep(0.1)
+            assert "thread-safe output" in str(browser_outputs)
+
+            await ExecuteCellTool().execute(
+                mode=ServerMode.MCP_SERVER,
+                notebook_manager=notebooks,
+                cell_index=1,
+                timeout_seconds=1,
+                ensure_kernel_alive_fn=lambda: kernel,
+            )
+            gc.collect()
     finally:
         kernel.stop()
         await asyncio.sleep(1)
