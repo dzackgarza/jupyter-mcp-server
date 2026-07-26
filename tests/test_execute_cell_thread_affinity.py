@@ -4,6 +4,7 @@
 
 """Regression proof for RTC notebook execution ownership."""
 
+import asyncio
 import gc
 import uuid
 
@@ -38,6 +39,14 @@ async def test_timed_out_rtc_execution_keeps_pycrdt_on_its_owning_thread(jupyter
                 "cells": [
                     {
                         "cell_type": "code",
+                        "source": "print('thread-safe output')",
+                        "metadata": {},
+                        "outputs": [],
+                        "execution_count": None,
+                        "id": "output-cell",
+                    },
+                    {
+                        "cell_type": "code",
                         "source": "import time; time.sleep(3); print('finished')",
                         "metadata": {},
                         "outputs": [],
@@ -47,6 +56,7 @@ async def test_timed_out_rtc_execution_keeps_pycrdt_on_its_owning_thread(jupyter
                 ],
             },
         },
+        timeout=10,
     )
     response.raise_for_status()
 
@@ -62,14 +72,24 @@ async def test_timed_out_rtc_execution_keeps_pycrdt_on_its_owning_thread(jupyter
     )
 
     try:
-        await ExecuteCellTool().execute(
+        outputs = await ExecuteCellTool().execute(
             mode=ServerMode.MCP_SERVER,
             notebook_manager=notebooks,
             cell_index=0,
+            timeout_seconds=10,
+            ensure_kernel_alive_fn=lambda: kernel,
+        )
+        assert "thread-safe output" in "\n".join(str(output) for output in outputs)
+
+        await ExecuteCellTool().execute(
+            mode=ServerMode.MCP_SERVER,
+            notebook_manager=notebooks,
+            cell_index=1,
             timeout_seconds=1,
             ensure_kernel_alive_fn=lambda: kernel,
         )
         gc.collect()
     finally:
         kernel.stop()
-        requests.delete(contents_url, headers=headers).raise_for_status()
+        await asyncio.sleep(1)
+        requests.delete(contents_url, headers=headers, timeout=10).raise_for_status()

@@ -16,15 +16,16 @@ from jupyter_mcp_server.hooks import HookEvent, HookRegistry
 from jupyter_mcp_server.tools._base import BaseTool, ServerMode
 from jupyter_mcp_server.utils import (
     clean_notebook_outputs,
+    execute_cell_thread_safe,
     execute_cell_with_forced_sync,
     execute_via_execution_stack,
     extract_output,
     get_current_notebook_context,
     get_jupyter_ydoc,
     safe_extract_outputs,
+    track_pending_execution,
     wait_for_kernel_idle,
     wait_for_kernel_ready,
-    track_pending_execution,
 )
 
 logger = logging.getLogger(__name__)
@@ -325,7 +326,7 @@ class ExecuteCellTool(BaseTool):
 
                     # Start execution in background
                     execution_task = asyncio.create_task(
-                        asyncio.to_thread(notebook.execute_cell, cell_index, kernel)
+                        execute_cell_thread_safe(notebook, cell_index, kernel)
                     )
                     track_pending_execution(kernel, execution_task)
 
@@ -346,6 +347,10 @@ class ExecuteCellTool(BaseTool):
                                 kernel.interrupt()
                                 outputs_log.append("[Sent interrupt signal to kernel]")
                             except Exception:
+                                pass
+                            try:
+                                await execution_task
+                            except asyncio.CancelledError:
                                 pass
                             break
 

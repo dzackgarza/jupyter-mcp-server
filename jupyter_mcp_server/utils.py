@@ -9,6 +9,7 @@ from typing import Any
 
 from jupyter_kernel_client import get_mimebundle_text
 from jupyter_nbmodel_client import NotebookModel
+from jupyter_nbmodel_client.model import save_in_notebook_hook
 from mcp.types import ImageContent
 
 from jupyter_mcp_server.config import ALLOW_IMG_OUTPUT
@@ -545,6 +546,78 @@ def track_pending_execution(kernel, task):
     task.add_done_callback(_clear)
 
 
+async def execute_cell_thread_safe(notebook, cell_index, kernel):
+    """Execute kernel I/O off-loop while keeping every YDoc object on its owner thread."""
+    ycell = notebook._doc.ycells[cell_index]
+    with notebook._lock:
+        source = ycell["source"].to_py()
+
+    with notebook._lock:
+        with ycell.doc.transaction(origin=notebook._changes_origin):
+            del ycell["outputs"][:]
+            ycell["execution_count"] = None
+            ycell["execution_state"] = "running"
+
+    loop = asyncio.get_running_loop()
+    messages: asyncio.Queue = asyncio.Queue()
+    finished = object()
+    outputs = []
+
+    def enqueue_output(message):
+        loop.call_soon_threadsafe(messages.put_nowait, message)
+
+    def execute_kernel():
+        try:
+            return kernel.execute_interactive(
+                source,
+                output_hook=enqueue_output,
+                allow_stdin=False,
+                silent=False,
+                store_history=True,
+                stop_on_error=True,
+                timeout=None,
+            )
+        finally:
+            loop.call_soon_threadsafe(messages.put_nowait, finished)
+
+    kernel_task = asyncio.create_task(asyncio.to_thread(execute_kernel))
+    track_pending_execution(kernel, kernel_task)
+    reply_content = {}
+    try:
+        while True:
+            message = await messages.get()
+            if message is finished:
+                break
+            save_in_notebook_hook(
+                notebook._lock,
+                outputs,
+                ycell,
+                notebook._changes_origin,
+                message,
+            )
+
+        reply = await kernel_task
+        reply_content = reply["content"]
+        return {
+            "execution_count": reply_content.get("execution_count"),
+            "outputs": outputs,
+            "status": reply_content["status"],
+        }
+    except asyncio.CancelledError:
+        if hasattr(kernel, "interrupt"):
+            kernel.interrupt()
+        try:
+            await asyncio.shield(kernel_task)
+        except Exception:
+            pass
+        raise
+    finally:
+        with notebook._lock:
+            with ycell.doc.transaction(origin=notebook._changes_origin):
+                ycell["execution_count"] = reply_content.get("execution_count")
+                ycell["execution_state"] = "idle"
+
+
 async def execute_cell_with_forced_sync(notebook, cell_index, kernel, timeout_seconds=300):
     """Execute cell with forced real-time synchronization."""
     from jupyter_mcp_server.log import logger
@@ -552,9 +625,7 @@ async def execute_cell_with_forced_sync(notebook, cell_index, kernel, timeout_se
     start_time = time.time()
 
     # Start execution
-    execution_future = asyncio.create_task(
-        asyncio.to_thread(notebook.execute_cell, cell_index, kernel)
-    )
+    execution_future = asyncio.create_task(execute_cell_thread_safe(notebook, cell_index, kernel))
     track_pending_execution(kernel, execution_future)
 
     last_output_count = 0
@@ -568,6 +639,10 @@ async def execute_cell_with_forced_sync(notebook, cell_index, kernel, timeout_se
                 if hasattr(kernel, "interrupt"):
                     kernel.interrupt()
             except Exception:
+                pass
+            try:
+                await execution_future
+            except asyncio.CancelledError:
                 pass
             raise asyncio.TimeoutError(f"Cell execution timed out after {timeout_seconds} seconds")
 
