@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import httpx
 import pytest
-from fastapi import HTTPException
+from jupyter_kernel_client import KernelClient
 
 from jupyter_mcp_server.assistant_api import _get_or_create_session_kernel
 from jupyter_mcp_server.config import reset_config, set_config
@@ -19,10 +20,10 @@ from .conftest import JUPYTER_TOKEN
 
 
 @pytest.mark.asyncio
-async def test_created_session_kernel_is_idle_before_helper_returns(
+async def test_created_session_kernel_executes_before_helper_returns(
     jupyter_server: str,
 ) -> None:
-    """The helper must not expose Jupyter's transient ``starting`` kernel."""
+    """Readiness is kernel responsiveness, not stale REST execution state."""
     path = f"test-kernel-readiness-{uuid.uuid4().hex}.ipynb"
     headers = {"Authorization": f"token {JUPYTER_TOKEN}"}
     session_id: str | None = None
@@ -45,27 +46,32 @@ async def test_created_session_kernel_is_idle_before_helper_returns(
         )
         created.raise_for_status()
         try:
+            kernel_id, session_id, _ = await _get_or_create_session_kernel(
+                path,
+                "python3",
+            )
+            kernel = KernelClient(
+                server_url=jupyter_server,
+                token=JUPYTER_TOKEN,
+                kernel_id=kernel_id,
+            )
             try:
-                kernel_id, session_id, _ = await _get_or_create_session_kernel(
-                    path,
-                    "python3",
+                await asyncio.to_thread(kernel.start)
+                reply = await asyncio.to_thread(
+                    kernel.execute,
+                    "print(2 + 2)",
+                    timeout=10,
                 )
-            except HTTPException as exc:
-                assert exc.status_code == 504
-                assert "did not become usable" in exc.detail
-                sessions = await client.get(
-                    f"{jupyter_server}/api/sessions",
-                    headers=headers,
-                )
-                sessions.raise_for_status()
-                assert all(session["path"] != path for session in sessions.json())
-            else:
-                kernel = await client.get(
-                    f"{jupyter_server}/api/kernels/{kernel_id}",
-                    headers=headers,
-                )
-                kernel.raise_for_status()
-                assert kernel.json()["execution_state"] in {"idle", "busy"}, kernel.json()
+                assert reply["status"] == "ok"
+                assert reply["outputs"] == [
+                    {
+                        "output_type": "stream",
+                        "name": "stdout",
+                        "text": "4\n",
+                    }
+                ]
+            finally:
+                await asyncio.to_thread(kernel.stop, shutdown_kernel=False)
         finally:
             if session_id is not None:
                 await client.delete(
