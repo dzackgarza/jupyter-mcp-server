@@ -1039,7 +1039,7 @@ async def use_notebook(request: UseNotebookRequest) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    async with runtime.lock:
+    async with runtime.lock_for(notebook_id):
         await _ensure_notebook_file(
             request.notebook_path,
             create=(request.mode == "create"),
@@ -1635,7 +1635,7 @@ async def restart_notebook(
 
     kernel_name = request.kernel_name if request is not None else "sagemath"
     try:
-        async with runtime.lock:
+        async with runtime.lock_for(notebook_id):
             path = decode_notebook_id(notebook_id)
             kernel_id, session_id = await _replace_session_kernel(path, kernel_name)
             runtime.notebooks.remove_notebook(notebook_id)
@@ -1673,7 +1673,7 @@ async def unuse_notebook(notebook_id: str) -> dict[str, Any]:
         )
     path = decode_notebook_id(notebook_id)
     kernel_id = runtime.notebooks.get_kernel_id(notebook_id)
-    async with runtime.lock:
+    async with runtime.lock_for(notebook_id):
         result = await safe_notebook_operation(
             lambda: UnuseNotebookTool().execute(
                 **_ctx(notebook_name=notebook_id)

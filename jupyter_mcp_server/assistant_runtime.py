@@ -11,10 +11,9 @@ and drives them through their ``execute`` methods.
 
 The HTTP contract is stateless — every request names the notebook — but
 the Jupyter kernel remains stateful because maintaining variables between
-cell executions is the purpose of a notebook kernel.  Because
-``NotebookManager`` keeps a process-wide current-notebook pointer, all
-notebook-specific operations run under one ``asyncio.Lock``.  Run one
-Uvicorn worker.
+cell executions is the purpose of a notebook kernel. Notebook operations
+are serialized per notebook so a slow kernel cannot block unrelated work.
+Run one Uvicorn worker.
 """
 
 from __future__ import annotations
@@ -76,13 +75,21 @@ def configure_jupyter() -> None:
 
 
 class AssistantRuntime:
-    """Process-wide runtime holding the notebook manager and a serialization lock."""
+    """Process-wide runtime holding the notebook manager and notebook locks."""
 
     def __init__(self) -> None:
         self.notebooks = NotebookManager()
         self.context = ServerContext.get_instance()
-        self.lock = asyncio.Lock()
+        self._notebook_locks: dict[str, asyncio.Lock] = {}
         self.pending_executions: dict[str, PendingExecution] = {}
+
+    def lock_for(self, notebook_id: str) -> asyncio.Lock:
+        """Return the serialization lock owned by one notebook."""
+        lock = self._notebook_locks.get(notebook_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._notebook_locks[notebook_id] = lock
+        return lock
 
     # ------------------------------------------------------------------
     # Kernel health
@@ -170,8 +177,8 @@ class AssistantRuntime:
         *,
         create: bool = False,
     ) -> tuple[str, Any]:
-        """Activate ``notebook_id`` under the lock, then run ``operation``."""
-        async with self.lock:
+        """Activate ``notebook_id`` under its lock, then run ``operation``."""
+        async with self.lock_for(notebook_id):
             path = await self.activate(notebook_id, create=create)
             result = await safe_notebook_operation(operation)
             return path, result

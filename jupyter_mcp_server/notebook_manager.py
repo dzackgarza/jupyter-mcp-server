@@ -12,6 +12,7 @@ replacing the scattered global variable approach with a unified architecture.
 import asyncio
 import logging
 from collections.abc import Callable
+from contextvars import ContextVar
 from types import TracebackType
 from typing import Any
 
@@ -97,7 +98,10 @@ class NotebookManager:
     def __init__(self):
         self._notebooks: dict[str, dict[str, Any]] = {}
         self._default_notebook_name = "default"
-        self._current_notebook: str | None = None  # Currently active notebook
+        self._current_notebook: ContextVar[str | None] = ContextVar(
+            f"current_notebook_{id(self)}",
+            default=None,
+        )
 
     def __contains__(self, name: str) -> bool:
         """Check if a notebook is managed by this instance."""
@@ -142,8 +146,8 @@ class NotebookManager:
 
         # For backward compatibility: if this is the first notebook or it's "default",
         # set it as the current notebook
-        if self._current_notebook is None or name == self._default_notebook_name:
-            self._current_notebook = name
+        if self._current_notebook.get() is None or name == self._default_notebook_name:
+            self._current_notebook.set(name)
 
     def remove_notebook(self, name: str) -> bool:
         """
@@ -184,16 +188,16 @@ class NotebookManager:
                 del self._notebooks[name]
 
                 # If we removed the current notebook, update the current pointer
-                if self._current_notebook == name:
+                if self._current_notebook.get() == name:
                     # Set to another notebook if available, prefer "default" for compatibility
                     if self._default_notebook_name in self._notebooks:
-                        self._current_notebook = self._default_notebook_name
+                        self._current_notebook.set(self._default_notebook_name)
                     elif self._notebooks:
                         # Set to the first available notebook
-                        self._current_notebook = next(iter(self._notebooks.keys()))
+                        self._current_notebook.set(next(iter(self._notebooks.keys())))
                     else:
                         # No notebooks left
-                        self._current_notebook = None
+                        self._current_notebook.set(None)
             return True
         return False
 
@@ -352,7 +356,7 @@ class NotebookManager:
             True if set successfully, False if notebook doesn't exist
         """
         if name in self._notebooks:
-            self._current_notebook = name
+            self._current_notebook.set(name)
             return True
         return False
 
@@ -363,7 +367,7 @@ class NotebookManager:
         Returns:
             Current notebook name or None if no active notebook
         """
-        return self._current_notebook
+        return self._current_notebook.get()
 
     def get_current_kernel(self) -> KernelClient | dict[str, Any] | None:
         """
@@ -372,7 +376,7 @@ class NotebookManager:
         Returns:
             Kernel client or None if no active notebook or no kernel found
         """
-        current = self._current_notebook or self._default_notebook_name
+        current = self.get_current_notebook() or self._default_notebook_name
         return self.get_kernel(current)
 
     def get_current_connection(self) -> NotebookConnection:
@@ -386,7 +390,7 @@ class NotebookManager:
         Raises:
             ValueError: If no notebooks exist and no default config is available
         """
-        current = self._current_notebook or self._default_notebook_name
+        current = self.get_current_notebook() or self._default_notebook_name
 
         # For backward compatibility: if the requested notebook doesn't exist but we're
         # asking for default, create a connection using the default config
@@ -410,7 +414,7 @@ class NotebookManager:
         Returns:
             Notebook file path or None if no active notebook
         """
-        current = self._current_notebook or self._default_notebook_name
+        current = self.get_current_notebook() or self._default_notebook_name
         if current in self._notebooks:
             return self._notebooks[current]["notebook_info"].get("path")
         return None
@@ -442,7 +446,7 @@ class NotebookManager:
             result[name] = {
                 "path": notebook_info.get("path", ""),
                 "kernel_status": kernel_status,
-                "is_current": name == self._current_notebook,
+                "is_current": name == self.get_current_notebook(),
             }
 
         return result
