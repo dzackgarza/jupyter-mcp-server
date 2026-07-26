@@ -18,8 +18,10 @@ mutation endpoints so the GPT can use "always allow" behavior.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Literal
 
+import nbformat
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -170,6 +172,15 @@ def _error_json(request: Request, exc: BaseException, status_code: int) -> JSONR
             notebook_path=notebook_path,
         ).model_dump(),
     )
+
+
+@app.middleware("http")
+async def _contain_unexpected_route_failures(request: Request, call_next):
+    """Return the GPT-readable envelope without leaking an ASGI exception."""
+    try:
+        return await call_next(request)
+    except Exception as exc:
+        return _error_json(request, exc, _boundary_status(exc) or 500)
 
 
 @app.exception_handler(Exception)
@@ -661,6 +672,105 @@ async def _replace_session_kernel(
     return replacement["kernel"]["id"], replacement["id"]
 
 
+async def _validate_notebook_for_mutation(notebook_id: str) -> str:
+    """Reject malformed persisted notebook data before opening its RTC room."""
+    import httpx
+
+    path = decode_notebook_id(notebook_id)
+    base_url, headers = _jupyter_connection()
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            f"{base_url}/api/contents/{path}",
+            params={"content": "1"},
+            headers=headers,
+        )
+    if response.status_code != 200:
+        try:
+            jupyter_detail = response.json().get("message", response.text)
+        except ValueError:
+            jupyter_detail = response.text
+        if "Notebook validation failed" in jupyter_detail:
+            match = re.search(
+                r"instance\['cells'\]\[(\d+)\]\['source'\]",
+                jupyter_detail,
+            )
+            location = f"cells[{match.group(1)}].source" if match else "notebook content"
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Notebook '{path}' is invalid at {location}: "
+                    f"{jupyter_detail.splitlines()[0]}. "
+                    "No RTC connection was opened and no mutation was attempted. "
+                    "Repair the notebook before retrying."
+                ),
+            )
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=(
+                f"Could not validate notebook '{path}' before mutation: "
+                f"{response.text[:500]}"
+            ),
+        )
+
+    content = response.json().get("content")
+    if not isinstance(content, dict):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Notebook '{path}' has no JSON notebook content. "
+                "Repair the notebook before retrying the mutation."
+            ),
+        )
+
+    cells = content.get("cells")
+    if not isinstance(cells, list):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Notebook '{path}' is invalid: cells must be a list; "
+                f"got {type(cells).__name__}. Repair the notebook before retrying."
+            ),
+        )
+    for index, cell in enumerate(cells):
+        if not isinstance(cell, dict):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Notebook '{path}' is invalid: cells[{index}] must be an object; "
+                    f"got {type(cell).__name__}. Repair the notebook before retrying."
+                ),
+            )
+        source = cell.get("source")
+        source_is_valid = isinstance(source, str) or (
+            isinstance(source, list)
+            and all(isinstance(line, str) for line in source)
+        )
+        if not source_is_valid:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Notebook '{path}' is invalid: cells[{index}].source must be "
+                    f"a string or list of strings; got {type(source).__name__}. "
+                    "No RTC connection was opened and no mutation was attempted. "
+                    "Repair the notebook before retrying."
+                ),
+            )
+
+    try:
+        nbformat.validate(content)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Notebook '{path}' failed nbformat validation before mutation: "
+                f"{type(exc).__name__}: {str(exc).splitlines()[0]}. "
+                "No RTC connection was opened and no mutation was attempted."
+            ),
+        ) from exc
+
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Routes — server-level
 # ---------------------------------------------------------------------------
@@ -871,6 +981,7 @@ async def insert_cell(
     request: InsertCellRequest,
 ) -> dict[str, Any]:
     """Insert a cell at the given index."""
+    await _validate_notebook_for_mutation(notebook_id)
     try:
         path, result = await runtime.run(
             notebook_id,
@@ -899,6 +1010,7 @@ async def overwrite_cell_source(
     request: OverwriteCellSourceRequest,
 ) -> dict[str, Any]:
     """Overwrite the source of a cell."""
+    await _validate_notebook_for_mutation(notebook_id)
     try:
         path, result = await runtime.run(
             notebook_id,
@@ -926,6 +1038,7 @@ async def edit_cell_source(
     request: EditCellSourceRequest,
 ) -> dict[str, Any]:
     """Apply a find-and-replace edit to a cell's source."""
+    await _validate_notebook_for_mutation(notebook_id)
     try:
         path, result = await runtime.run(
             notebook_id,
@@ -954,6 +1067,7 @@ async def delete_cell(
     request: DeleteCellRequest,
 ) -> dict[str, Any]:
     """Delete one or more cells by index."""
+    await _validate_notebook_for_mutation(notebook_id)
     try:
         path, result = await runtime.run(
             notebook_id,
@@ -980,6 +1094,7 @@ async def move_cell(
     request: MoveCellRequest,
 ) -> dict[str, Any]:
     """Move a cell from source_index to target_index."""
+    await _validate_notebook_for_mutation(notebook_id)
     try:
         path, result = await runtime.run(
             notebook_id,
@@ -1012,6 +1127,7 @@ async def clear_cell_output(
     cell_index: int,
 ) -> dict[str, Any]:
     """Clear the output of a single cell."""
+    await _validate_notebook_for_mutation(notebook_id)
     try:
         path, result = await runtime.run(
             notebook_id,
@@ -1039,6 +1155,7 @@ async def execute_cell(
     request: ExecuteCellRequest,
 ) -> dict[str, Any]:
     """Execute a cell by index and return its outputs."""
+    await _validate_notebook_for_mutation(notebook_id)
     try:
         path, state = await runtime.start_execution(
             notebook_id,
@@ -1075,6 +1192,8 @@ async def insert_execute_code_cell(
     Mirrors the existing MCP wrapper: InsertCellTool then ExecuteCellTool
     on the same index, with one retry on the execution step.
     """
+    await _validate_notebook_for_mutation(notebook_id)
+
     async def _insert_and_execute() -> Any:
         await safe_notebook_operation(
             lambda: InsertCellTool().execute(

@@ -173,10 +173,17 @@ class OverwriteCellSourceTool(BaseTool):
 
             # Get original cell content
             old_source = notebook.get_cell_source(cell_index)
-            if isinstance(old_source, list):
+            if isinstance(old_source, list) and all(
+                isinstance(line, str) for line in old_source
+            ):
                 old_source = "".join(old_source)
-            else:
-                old_source = str(old_source)
+            elif not isinstance(old_source, str):
+                raise ToolError(
+                    f"[overwrite_cell_source] Refusing to mutate cell {cell_index}: "
+                    f"the RTC source must be text, but is {type(old_source).__name__}. "
+                    "The persisted notebook or its YDoc room is malformed; repair both "
+                    "before retrying."
+                )
             notebook.set_cell_source(cell_index, cell_source)
             return self._generate_diff(old_source, cell_source)
 

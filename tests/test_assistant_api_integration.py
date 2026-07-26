@@ -836,7 +836,7 @@ async def test_mutation_rejects_malformed_notebook_before_rtc_connection(
     body = response.json()
     assert response.status_code == HTTPStatus.OK
     assert body["ok"] is False, response.text
-    assert body["http_status"] == HTTPStatus.CONFLICT
+    assert body["http_status"] == HTTPStatus.CONFLICT, body
     assert "cells[0].source" in body["error_message"]
     assert "dict" in body["error_message"]
 

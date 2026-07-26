@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import pytest
 from fastapi.routing import APIRoute
+from httpx import ASGITransport, AsyncClient
 
-from jupyter_mcp_server.assistant_api import app
+from jupyter_mcp_server.assistant_api import app, runtime
 
 EXPECTED_OPERATION_IDS = {
     "health",
@@ -58,6 +59,26 @@ MUTATION_OPERATION_IDS = {
 
 def _api_routes() -> list[APIRoute]:
     return [r for r in app.routes if isinstance(r, APIRoute)]
+
+
+@pytest.mark.asyncio
+async def test_unexpected_route_failure_is_contained(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unexpected route crash must remain a wire-200 GPT error envelope."""
+
+    def crash(_notebook_id: str) -> tuple[str, dict[str, object]]:
+        raise RuntimeError("unexpected execution-status failure")
+
+    monkeypatch.setattr(runtime, "execution_status", crash)
+    transport = ASGITransport(app=app, raise_app_exceptions=True)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/v1/notebooks/nb_test/execution")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["ok"] is False
+    assert body["http_status"] == 500
+    assert body["error_type"] == "RuntimeError"
+    assert "unexpected execution-status failure" in body["error_message"]
 
 
 def test_openapi_document_generates() -> None:
