@@ -151,6 +151,8 @@ def _cleanup_test_notebooks(jupyter_server: str, assistant_api_url: str):
         "test-restart.ipynb",
         "test-session-reuse.ipynb",
         "test-handoff.ipynb",
+        "test-hung-a.ipynb",
+        "test-hung-b.ipynb",
     )
     for name in names:
         try:
@@ -762,6 +764,51 @@ async def test_execution_deadline_hands_off_without_interrupting_kernel(
     assert "handoff-finished" in str(status_body["outputs"])
     notebook = await client.get(f"/v1/notebooks/{notebook_id}")
     assert "must-not-be-queued" not in str(notebook.json())
+
+
+async def test_handed_off_execution_does_not_block_another_notebook(
+    client: AsyncClient,
+) -> None:
+    first = await client.post(
+        "/v1/notebooks/use",
+        json={
+            "notebook_path": "test-hung-a.ipynb",
+            "mode": "create",
+            "kernel_name": "python3",
+        },
+    )
+    second = await client.post(
+        "/v1/notebooks/use",
+        json={
+            "notebook_path": "test-hung-b.ipynb",
+            "mode": "create",
+            "kernel_name": "python3",
+        },
+    )
+    assert first.json()["ok"] is True, first.text
+    assert second.json()["ok"] is True, second.text
+
+    running = await client.post(
+        f"/v1/notebooks/{first.json()['notebook_id']}/execute-code",
+        json={
+            "code": "import time; time.sleep(5)",
+            "handoff_after_seconds": 1,
+        },
+    )
+    assert running.json()["status"] == "running", running.text
+
+    started_at = time.monotonic()
+    unrelated = await client.get(
+        f"/v1/notebooks/{second.json()['notebook_id']}"
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert unrelated.status_code == HTTPStatus.OK, unrelated.text
+    assert unrelated.json()["ok"] is True, unrelated.text
+    assert elapsed < 2, (
+        "An execution on one notebook monopolized the process-wide runtime lock "
+        f"for {elapsed:.1f}s and blocked an unrelated notebook."
+    )
 
 
 async def test_use_notebook_rejects_kernelspec_mismatch(
