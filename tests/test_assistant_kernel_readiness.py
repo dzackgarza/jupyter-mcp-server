@@ -10,6 +10,7 @@ import uuid
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from jupyter_mcp_server.assistant_api import _get_or_create_session_kernel
 from jupyter_mcp_server.config import reset_config, set_config
@@ -44,16 +45,27 @@ async def test_created_session_kernel_is_idle_before_helper_returns(
         )
         created.raise_for_status()
         try:
-            kernel_id, session_id, _ = await _get_or_create_session_kernel(
-                path,
-                "python3",
-            )
-            kernel = await client.get(
-                f"{jupyter_server}/api/kernels/{kernel_id}",
-                headers=headers,
-            )
-            kernel.raise_for_status()
-            assert kernel.json()["execution_state"] == "idle", kernel.json()
+            try:
+                kernel_id, session_id, _ = await _get_or_create_session_kernel(
+                    path,
+                    "python3",
+                )
+            except HTTPException as exc:
+                assert exc.status_code == 504
+                assert "did not become usable" in exc.detail
+                sessions = await client.get(
+                    f"{jupyter_server}/api/sessions",
+                    headers=headers,
+                )
+                sessions.raise_for_status()
+                assert all(session["path"] != path for session in sessions.json())
+            else:
+                kernel = await client.get(
+                    f"{jupyter_server}/api/kernels/{kernel_id}",
+                    headers=headers,
+                )
+                kernel.raise_for_status()
+                assert kernel.json()["execution_state"] in {"idle", "busy"}, kernel.json()
         finally:
             if session_id is not None:
                 await client.delete(

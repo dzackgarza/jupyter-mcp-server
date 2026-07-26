@@ -89,6 +89,22 @@ def test_openapi_document_generates() -> None:
     assert schema["info"]["title"] == "Jupyter Assistant API"
 
 
+def test_read_notebook_schema_directs_bounded_overview_then_detail() -> None:
+    """The Action schema must make the existing bounded workflow discoverable."""
+    operation = app.openapi()["paths"]["/v1/notebooks/{notebook_id}"]["get"]
+    parameters = {
+        parameter["name"]: parameter
+        for parameter in operation["parameters"]
+    }
+
+    format_description = parameters["response_format"]["description"]
+    limit_description = parameters["limit"]["description"]
+    assert "brief" in format_description
+    assert "bounded 'detailed' page" in format_description
+    assert "Action response limit" in limit_description
+    assert parameters["limit"]["schema"]["maximum"] == 200
+
+
 def test_all_expected_operation_ids_present() -> None:
     """Every expected operationId is present in the route table."""
     ops = {r.operation_id for r in _api_routes() if r.operation_id}

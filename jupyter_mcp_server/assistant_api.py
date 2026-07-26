@@ -17,13 +17,15 @@ mutation endpoints so the GPT can use "always allow" behavior.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
+import time
 from typing import Any, Literal
 
 import nbformat
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -35,6 +37,7 @@ from jupyter_mcp_server.assistant_runtime import (
 )
 from jupyter_mcp_server.config import get_config
 from jupyter_mcp_server.notebook_id import decode_notebook_id, encode_notebook_id
+from jupyter_mcp_server.notebook_manager import NotebookConnection
 from jupyter_mcp_server.tools import (
     ClearCellOutputTool,
     DeleteCellTool,
@@ -74,6 +77,9 @@ app = FastAPI(
 )
 
 runtime = AssistantRuntime()
+DEFAULT_KERNEL_NAME = "sagemath"
+KERNEL_READY_TIMEOUT_SECONDS = 30
+KERNEL_READY_POLL_SECONDS = 0.5
 
 _CONSEQUENTIAL_FALSE: dict[str, Any] = {"x-openai-isConsequential": False}
 
@@ -234,7 +240,7 @@ class UseNotebookRequest(BaseModel):
     notebook_path: str = Field(..., description="Jupyter-root-relative path ending in .ipynb")
     mode: Literal["connect", "create"] = Field("connect", description="Open existing or create new")
     kernel_name: str = Field(
-        "sagemath",
+        DEFAULT_KERNEL_NAME,
         description="Kernelspec name (e.g. sagemath, python3, pari_jupyter, gap, singular, lean4, octave, coconut, julia-1.10). Default: sagemath.",
     )
 
@@ -297,7 +303,7 @@ class ExecuteCodeRequest(BaseModel):
 
 class RestartNotebookRequest(BaseModel):
     kernel_name: str = Field(
-        "sagemath",
+        DEFAULT_KERNEL_NAME,
         description="Kernelspec for the fresh session. Default: sagemath.",
     )
 
@@ -345,6 +351,44 @@ class NotebookResultResponse(BaseModel):
     notebook_id: str
     notebook_path: str
     result: Any = None
+
+
+class PersistedNotebookStatus(BaseModel):
+    valid: bool
+    cell_count: int | None = None
+    kernelspec_name: str | None = None
+    kernelspec_display_name: str | None = None
+    error: str | None = None
+
+
+class SessionStatus(BaseModel):
+    count: int
+    id: str | None = None
+
+
+class KernelStatus(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    execution_state: str | None = None
+    matches_persisted_kernelspec: bool | None = None
+    matches_default: bool | None = None
+    default_name: str = DEFAULT_KERNEL_NAME
+
+
+class RtcStatus(BaseModel):
+    readable: bool
+    cell_count: int | None = None
+    error: str | None = None
+
+
+class NotebookStatusResponse(BaseModel):
+    ok: bool
+    notebook_id: str
+    notebook_path: str
+    persisted: PersistedNotebookStatus
+    session: SessionStatus
+    kernel: KernelStatus
+    rtc: RtcStatus
 
 
 class CellResultResponse(BaseModel):
@@ -565,6 +609,14 @@ async def _get_or_create_session_kernel(
                         "with a different kernel."
                     ),
                 )
+            await _wait_for_session_kernel_ready(
+                client,
+                base_url=base_url,
+                headers=headers,
+                notebook_path=notebook_path,
+                session_id=session["id"],
+                kernel_id=kernel["id"],
+            )
             return kernel["id"], session["id"], True
 
         resp = await client.post(
@@ -577,19 +629,109 @@ async def _get_or_create_session_kernel(
             },
             headers=headers,
         )
+        if resp.status_code != 201:
+            detail = resp.text[:500]
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Failed to create a Jupyter session for '{notebook_path}' "
+                    f"with kernel '{kernel_name}': {resp.status_code} {detail}"
+                ),
+            )
 
-    if resp.status_code != 201:
-        detail = resp.text[:500]
+        session = resp.json()
+        await _wait_for_session_kernel_ready(
+            client,
+            base_url=base_url,
+            headers=headers,
+            notebook_path=notebook_path,
+            session_id=session["id"],
+            kernel_id=session["kernel"]["id"],
+        )
+        return session["kernel"]["id"], session["id"], False
+
+
+async def _delete_unready_session(
+    client: Any,
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    notebook_path: str,
+    session_id: str,
+) -> None:
+    """Remove a session whose kernel never became usable."""
+    deleted = await client.delete(
+        f"{base_url}/api/sessions/{session_id}",
+        headers=headers,
+    )
+    if deleted.status_code != 204:
         raise HTTPException(
-            status_code=400,
+            status_code=502,
             detail=(
-                f"Failed to create a Jupyter session for '{notebook_path}' "
-                f"with kernel '{kernel_name}': {resp.status_code} {detail}"
+                f"Kernel readiness failed for '{notebook_path}', and Jupyter could not "
+                f"remove unusable session '{session_id}': "
+                f"{deleted.status_code} {deleted.text[:500]}"
             ),
         )
 
-    session = resp.json()
-    return session["kernel"]["id"], session["id"], False
+
+async def _wait_for_session_kernel_ready(
+    client: Any,
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    notebook_path: str,
+    session_id: str,
+    kernel_id: str,
+) -> dict[str, Any]:
+    """Wait until Jupyter reports an operational kernel or remove the session."""
+    deadline = time.monotonic() + KERNEL_READY_TIMEOUT_SECONDS
+    last_state: str | None = None
+
+    while True:
+        response = await client.get(
+            f"{base_url}/api/kernels/{kernel_id}",
+            headers=headers,
+        )
+        if response.status_code != 200:
+            await _delete_unready_session(
+                client,
+                base_url=base_url,
+                headers=headers,
+                notebook_path=notebook_path,
+                session_id=session_id,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Jupyter stopped reporting kernel '{kernel_id}' for "
+                    f"'{notebook_path}' during readiness checks: "
+                    f"{response.status_code} {response.text[:500]}"
+                ),
+            )
+
+        kernel = response.json()
+        last_state = kernel.get("execution_state")
+        if last_state in {"idle", "busy"}:
+            return kernel
+        if last_state == "dead" or time.monotonic() >= deadline:
+            await _delete_unready_session(
+                client,
+                base_url=base_url,
+                headers=headers,
+                notebook_path=notebook_path,
+                session_id=session_id,
+            )
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    f"Kernel '{kernel_id}' for '{notebook_path}' did not become usable "
+                    f"within {KERNEL_READY_TIMEOUT_SECONDS} seconds; "
+                    f"last execution_state was {last_state!r}. "
+                    f"Unusable session '{session_id}' was removed."
+                ),
+            )
+        await asyncio.sleep(KERNEL_READY_POLL_SECONDS)
 
 
 async def _replace_session_kernel(
@@ -668,6 +810,14 @@ async def _replace_session_kernel(
             )
 
         replacement = created.json()
+        await _wait_for_session_kernel_ready(
+            client,
+            base_url=base_url,
+            headers=headers,
+            notebook_path=notebook_path,
+            session_id=replacement["id"],
+            kernel_id=replacement["kernel"]["id"],
+        )
 
     return replacement["kernel"]["id"], replacement["id"]
 
@@ -917,11 +1067,29 @@ async def use_notebook(request: UseNotebookRequest) -> dict[str, Any]:
 )
 async def read_notebook(
     notebook_id: str,
-    response_format: Literal["brief", "detailed"] = "brief",
-    start_index: int = 0,
-    limit: int = 20,
+    response_format: Literal["brief", "detailed"] = Query(
+        "brief",
+        description=(
+            "Use 'brief' first to locate cells without returning their full sources; "
+            "then request a bounded 'detailed' page."
+        ),
+    ),
+    start_index: int = Query(
+        0,
+        ge=0,
+        description="Zero-based first cell in this page.",
+    ),
+    limit: int = Query(
+        20,
+        ge=1,
+        le=200,
+        description=(
+            "Maximum cells in this page. Keep detailed pages small to remain within "
+            "the Action response limit."
+        ),
+    ),
 ) -> dict[str, Any]:
-    """Read notebook contents (paginated)."""
+    """Read one bounded page; use brief overview before detailed source pages."""
     try:
         path, result = await runtime.run(
             notebook_id,
@@ -937,6 +1105,149 @@ async def read_notebook(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, result=result)
+
+
+@app.get(
+    "/v1/notebooks/{notebook_id}/status",
+    operation_id="get_notebook_status",
+    response_model=NotebookStatusResponse,
+)
+async def get_notebook_status(notebook_id: str) -> dict[str, Any]:
+    """Inspect persisted, session, kernel, and RTC state in one request."""
+    try:
+        path = decode_notebook_id(notebook_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    base_url, headers = _jupyter_connection()
+
+    import httpx
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        contents_response = await client.get(
+            f"{base_url}/api/contents/{path}",
+            params={"content": "1"},
+            headers=headers,
+        )
+        if contents_response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Notebook '{path}' was not found.")
+
+        persisted: dict[str, Any]
+        content: dict[str, Any] | None = None
+        if contents_response.status_code == 200:
+            model = contents_response.json()
+            candidate = model.get("content")
+            content = candidate if isinstance(candidate, dict) else None
+            if content is None:
+                persisted = {
+                    "valid": False,
+                    "error": "Jupyter returned no JSON notebook content.",
+                }
+            else:
+                metadata = content.get("metadata", {})
+                kernelspec = metadata.get("kernelspec", {}) if isinstance(metadata, dict) else {}
+                try:
+                    nbformat.validate(content)
+                    validation_error = None
+                except Exception as exc:
+                    validation_error = (
+                        f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+                    )
+                cells = content.get("cells")
+                persisted = {
+                    "valid": validation_error is None,
+                    "cell_count": len(cells) if isinstance(cells, list) else None,
+                    "kernelspec_name": kernelspec.get("name"),
+                    "kernelspec_display_name": kernelspec.get("display_name"),
+                    "error": validation_error,
+                }
+        else:
+            persisted = {
+                "valid": False,
+                "error": (
+                    f"Jupyter contents request failed with "
+                    f"{contents_response.status_code}: {contents_response.text[:500]}"
+                ),
+            }
+
+        sessions_response = await client.get(
+            f"{base_url}/api/sessions",
+            headers=headers,
+        )
+        if sessions_response.status_code != 200:
+            raise HTTPException(
+                status_code=sessions_response.status_code,
+                detail=(
+                    "Could not inspect Jupyter sessions while building notebook "
+                    f"status: {sessions_response.text[:500]}"
+                ),
+            )
+        matching_sessions = [
+            session
+            for session in sessions_response.json()
+            if session.get("path") == path
+        ]
+
+    session = matching_sessions[0] if len(matching_sessions) == 1 else None
+    kernel = session.get("kernel", {}) if session else {}
+    persisted_kernel_name = persisted.get("kernelspec_name")
+    live_kernel_name = kernel.get("name")
+
+    rtc: dict[str, Any] = {
+        "readable": False,
+        "error": (
+            "RTC was not probed because the notebook has no unique live session."
+            if session is None
+            else "RTC was not probed because persisted notebook validation failed."
+        ),
+    }
+    if session is not None and persisted["valid"]:
+        try:
+            config = get_config()
+            async with asyncio.timeout(15):
+                async with NotebookConnection(
+                    {
+                        "server_url": base_url,
+                        "token": config.document_token or config.runtime_token,
+                        "path": path,
+                    }
+                ) as notebook:
+                    rtc_model = notebook.as_dict()
+            rtc = {
+                "readable": True,
+                "cell_count": len(rtc_model.get("cells", [])),
+            }
+        except Exception as exc:
+            rtc = {
+                "readable": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    return _envelope(
+        notebook_id,
+        path,
+        persisted=persisted,
+        session={
+            "count": len(matching_sessions),
+            "id": session.get("id") if session else None,
+        },
+        kernel={
+            "id": kernel.get("id"),
+            "name": live_kernel_name,
+            "execution_state": kernel.get("execution_state"),
+            "matches_persisted_kernelspec": (
+                live_kernel_name == persisted_kernel_name
+                if live_kernel_name is not None and persisted_kernel_name is not None
+                else None
+            ),
+            "matches_default": (
+                live_kernel_name == DEFAULT_KERNEL_NAME
+                if live_kernel_name is not None
+                else None
+            ),
+            "default_name": DEFAULT_KERNEL_NAME,
+        },
+        rtc=rtc,
+    )
 
 
 @app.get(

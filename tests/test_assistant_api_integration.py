@@ -45,8 +45,6 @@ from requests.exceptions import ConnectionError as ReqConnectionError
 
 from jupyter_mcp_server.notebook_id import encode_notebook_id
 
-from jupyter_mcp_server.notebook_id import encode_notebook_id
-
 pytestmark = pytest.mark.asyncio
 
 
@@ -249,36 +247,47 @@ async def test_2_read_notebook_by_id(client: AsyncClient) -> None:
     assert "result" in data
 
 
-async def test_notebook_status_consolidates_persisted_session_and_rtc_state(
+async def test_notebook_status_reports_persisted_state_without_a_session(
     client: AsyncClient,
+    jupyter_server: str,
 ) -> None:
-    created = await client.post(
-        "/v1/notebooks/use",
-        json={
-            "notebook_path": "test-create.ipynb",
-            "mode": "create",
-            "kernel_name": "python3",
-        },
-    )
-    created_body = created.json()
-    assert created_body["ok"] is True, created.text
-
-    response = await client.get(
-        f"/v1/notebooks/{created_body['notebook_id']}/status"
-    )
-    body = response.json()
-    assert response.status_code == HTTPStatus.OK
-    assert body["ok"] is True, response.text
-    assert body["notebook_path"] == "test-create.ipynb"
-    assert body["persisted"]["valid"] is True
-    assert body["persisted"]["cell_count"] == 0
-    assert body["session"]["id"] == created_body["session_id"]
-    assert body["kernel"]["id"] == created_body["kernel_id"]
-    assert body["kernel"]["name"] == "python3"
-    assert body["kernel"]["execution_state"] == "idle"
-    assert body["kernel"]["matches_persisted_kernelspec"] is True
-    assert body["kernel"]["matches_default"] is False
-    assert body["rtc"]["readable"] is True
+    path = f"test-status-{uuid.uuid4().hex}.ipynb"
+    notebook_id = encode_notebook_id(path)
+    async with AsyncClient(base_url=jupyter_server, timeout=30) as jupyter:
+        created = await jupyter.put(
+            f"/api/contents/{path}",
+            params={"token": "MY_TOKEN"},
+            json={
+                "type": "notebook",
+                "format": "json",
+                "content": {
+                    "cells": [],
+                    "metadata": {},
+                    "nbformat": 4,
+                    "nbformat_minor": 5,
+                },
+            },
+        )
+        created.raise_for_status()
+        try:
+            response = await client.get(f"/v1/notebooks/{notebook_id}/status")
+            body = response.json()
+            assert response.status_code == HTTPStatus.OK
+            assert body["ok"] is True, response.text
+            assert body["notebook_path"] == path
+            assert body["persisted"]["valid"] is True
+            assert body["persisted"]["cell_count"] == 0
+            assert body["session"] == {"count": 0, "id": None}
+            assert body["kernel"]["id"] is None
+            assert body["kernel"]["execution_state"] is None
+            assert body["rtc"]["readable"] is False
+            assert "no unique live session" in body["rtc"]["error"]
+        finally:
+            deleted = await jupyter.delete(
+                f"/api/contents/{path}",
+                params={"token": "MY_TOKEN"},
+            )
+            assert deleted.status_code == HTTPStatus.NO_CONTENT
 
 
 # ---------------------------------------------------------------------------
