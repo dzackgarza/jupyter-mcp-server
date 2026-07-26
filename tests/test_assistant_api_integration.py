@@ -45,6 +45,8 @@ from requests.exceptions import ConnectionError as ReqConnectionError
 
 from jupyter_mcp_server.notebook_id import encode_notebook_id
 
+from jupyter_mcp_server.notebook_id import encode_notebook_id
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -781,3 +783,70 @@ async def test_restart_defaults_existing_python_session_to_sagemath(
     )
     assert explicit_python.json()["ok"] is True, explicit_python.text
     assert explicit_python.json()["kernel_name"] == "python3"
+
+
+async def test_mutation_rejects_malformed_notebook_before_rtc_connection(
+    client: AsyncClient,
+    jupyter_server: str,
+) -> None:
+    path = "test-malformed-preflight.ipynb"
+    notebook_id = encode_notebook_id(path)
+
+    malformed = {
+        "type": "notebook",
+        "format": "json",
+        "content": {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {
+                "language_info": {
+                    "name": "python",
+                    "mimetype": "text/x-python",
+                    "file_extension": ".py",
+                }
+            },
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": {
+                        "name": "python",
+                        "mimetype": "text/x-python",
+                        "file_extension": ".py",
+                    },
+                }
+            ],
+        },
+    }
+    async with AsyncClient(base_url=jupyter_server) as jupyter:
+        saved = await jupyter.put(
+            f"/api/contents/{path}",
+            params={"token": "MY_TOKEN"},
+            json=malformed,
+        )
+    assert saved.status_code in (HTTPStatus.OK, HTTPStatus.CREATED), saved.text
+
+    sessions_before = await _jupyter_json(jupyter_server, "/api/sessions")
+    matching_before = [session for session in sessions_before if session["path"] == path]
+
+    response = await client.put(
+        f"/v1/notebooks/{notebook_id}/cells/0",
+        json={"cell_source": "replacement"},
+    )
+    body = response.json()
+    assert response.status_code == HTTPStatus.OK
+    assert body["ok"] is False, response.text
+    assert body["http_status"] == HTTPStatus.CONFLICT
+    assert "cells[0].source" in body["error_message"]
+    assert "dict" in body["error_message"]
+
+    sessions_after = await _jupyter_json(jupyter_server, "/api/sessions")
+    matching_after = [session for session in sessions_after if session["path"] == path]
+    assert matching_after == matching_before
+
+    async with AsyncClient(base_url=jupyter_server) as jupyter:
+        persisted = await jupyter.get(
+            f"/api/contents/{path}",
+            params={"token": "MY_TOKEN", "content": "1"},
+        )
+    assert persisted.json()["content"]["cells"][0]["source"] == malformed["content"]["cells"][0]["source"]
