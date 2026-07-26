@@ -79,7 +79,6 @@ app = FastAPI(
 runtime = AssistantRuntime()
 DEFAULT_KERNEL_NAME = "sagemath"
 KERNEL_READY_TIMEOUT_SECONDS = 30
-KERNEL_READY_POLL_SECONDS = 0.5
 
 _CONSEQUENTIAL_FALSE: dict[str, Any] = {"x-openai-isConsequential": False}
 
@@ -684,54 +683,69 @@ async def _wait_for_session_kernel_ready(
     session_id: str,
     kernel_id: str,
 ) -> dict[str, Any]:
-    """Wait until Jupyter reports an operational kernel or remove the session."""
-    deadline = time.monotonic() + KERNEL_READY_TIMEOUT_SECONDS
-    last_state: str | None = None
+    """Require a kernel-info reply, independent of stale REST execution state."""
+    from jupyter_kernel_client import KernelClient
 
-    while True:
-        response = await client.get(
-            f"{base_url}/api/kernels/{kernel_id}",
+    response = await client.get(
+        f"{base_url}/api/kernels/{kernel_id}",
+        headers=headers,
+    )
+    if response.status_code != 200:
+        await _delete_unready_session(
+            client,
+            base_url=base_url,
             headers=headers,
+            notebook_path=notebook_path,
+            session_id=session_id,
         )
-        if response.status_code != 200:
-            await _delete_unready_session(
-                client,
-                base_url=base_url,
-                headers=headers,
-                notebook_path=notebook_path,
-                session_id=session_id,
-            )
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    f"Jupyter stopped reporting kernel '{kernel_id}' for "
-                    f"'{notebook_path}' during readiness checks: "
-                    f"{response.status_code} {response.text[:500]}"
-                ),
-            )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Jupyter stopped reporting kernel '{kernel_id}' for "
+                f"'{notebook_path}' before readiness checks: "
+                f"{response.status_code} {response.text[:500]}"
+            ),
+        )
 
-        kernel = response.json()
-        last_state = kernel.get("execution_state")
-        if last_state in {"idle", "busy"}:
-            return kernel
-        if last_state == "dead" or time.monotonic() >= deadline:
-            await _delete_unready_session(
-                client,
-                base_url=base_url,
-                headers=headers,
-                notebook_path=notebook_path,
-                session_id=session_id,
+    kernel_model = response.json()
+
+    def _probe_kernel_channels() -> None:
+        deadline = time.monotonic() + KERNEL_READY_TIMEOUT_SECONDS
+        kernel = KernelClient(
+            server_url=base_url,
+            token=get_config().runtime_token,
+            kernel_id=kernel_id,
+        )
+        try:
+            kernel.start(timeout=max(0.1, deadline - time.monotonic()))
+            kernel._manager.client.wait_for_ready(
+                timeout=max(0.1, deadline - time.monotonic())
             )
-            raise HTTPException(
-                status_code=504,
-                detail=(
-                    f"Kernel '{kernel_id}' for '{notebook_path}' did not become usable "
-                    f"within {KERNEL_READY_TIMEOUT_SECONDS} seconds; "
-                    f"last execution_state was {last_state!r}. "
-                    f"Unusable session '{session_id}' was removed."
-                ),
-            )
-        await asyncio.sleep(KERNEL_READY_POLL_SECONDS)
+        finally:
+            kernel.stop(shutdown_kernel=False)
+
+    try:
+        await asyncio.to_thread(_probe_kernel_channels)
+    except Exception as exc:
+        await _delete_unready_session(
+            client,
+            base_url=base_url,
+            headers=headers,
+            notebook_path=notebook_path,
+            session_id=session_id,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"Kernel '{kernel_id}' for '{notebook_path}' did not answer a "
+                f"kernel-info request within {KERNEL_READY_TIMEOUT_SECONDS} seconds; "
+                f"REST execution_state was {kernel_model.get('execution_state')!r}. "
+                f"Unusable session '{session_id}' was removed. "
+                f"Probe error: {type(exc).__name__}: {exc}"
+            ),
+        ) from exc
+
+    return kernel_model
 
 
 async def _replace_session_kernel(

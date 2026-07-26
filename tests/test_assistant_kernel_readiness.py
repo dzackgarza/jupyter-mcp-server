@@ -20,7 +20,7 @@ from .conftest import JUPYTER_TOKEN
 
 
 @pytest.mark.asyncio
-async def test_created_session_kernel_executes_before_helper_returns(
+async def test_helper_returns_kernel_that_executes_immediately(
     jupyter_server: str,
 ) -> None:
     """Readiness is kernel responsiveness, not stale REST execution state."""
