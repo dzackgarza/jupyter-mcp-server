@@ -774,3 +774,10 @@ async def test_restart_defaults_existing_python_session_to_sagemath(
     )
     assert executed.json()["ok"] is True, executed.text
     assert "4" in str(executed.json()["outputs"])
+
+    explicit_python = await client.post(
+        f"/v1/notebooks/{notebook_id}/restart",
+        json={"kernel_name": "python3"},
+    )
+    assert explicit_python.json()["ok"] is True, explicit_python.text
+    assert explicit_python.json()["kernel_name"] == "python3"

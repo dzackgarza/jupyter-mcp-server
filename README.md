@@ -54,7 +54,7 @@ All routes are served under `https://jupyter-assistant.dzackgarza.com`. The full
 | Method | Path | Operation ID | Description |
 |---|---|---|---|
 | POST | `/v1/notebooks/use` | `use_notebook` | Open or create a notebook and reuse its session-bound kernel |
-| POST | `/v1/notebooks/{notebook_id}/restart` | `restart_notebook` | Restart the notebook's kernel |
+| POST | `/v1/notebooks/{notebook_id}/restart` | `restart_notebook` | Replace the session with a fresh Sage kernel by default; pass `kernel_name` to override |
 | POST | `/v1/notebooks/{notebook_id}/unuse` | `unuse_notebook` | Disconnect the Assistant client without shutting down the shared session kernel |
 
 ### Reading

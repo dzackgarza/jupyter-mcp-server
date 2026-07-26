@@ -46,7 +46,6 @@ from jupyter_mcp_server.tools import (
     OverwriteCellSourceTool,
     ReadCellTool,
     ReadNotebookTool,
-    RestartNotebookTool,
     UnuseNotebookTool,
 )
 from jupyter_mcp_server.utils import (
@@ -285,6 +284,13 @@ class ExecuteCodeRequest(BaseModel):
     )
 
 
+class RestartNotebookRequest(BaseModel):
+    kernel_name: str = Field(
+        "sagemath",
+        description="Kernelspec for the fresh session. Default: sagemath.",
+    )
+
+
 class ReadNotebookQuery(BaseModel):
     response_format: Literal["brief", "detailed"] = Field("brief")
     start_index: int = Field(0, ge=0)
@@ -403,6 +409,9 @@ class RestartResponse(BaseModel):
     ok: bool
     notebook_id: str
     notebook_path: str
+    kernel_id: str | None = None
+    kernel_name: str | None = None
+    session_id: str | None = None
     result: Any = None
 
 
@@ -570,6 +579,86 @@ async def _get_or_create_session_kernel(
 
     session = resp.json()
     return session["kernel"]["id"], session["id"], False
+
+
+async def _replace_session_kernel(
+    notebook_path: str,
+    kernel_name: str,
+) -> tuple[str, str]:
+    """Replace the notebook's Jupyter session with a fresh requested kernel."""
+    import httpx
+
+    base_url, headers = _jupyter_connection()
+    async with httpx.AsyncClient(timeout=30) as client:
+        specs_resp = await client.get(f"{base_url}/api/kernelspecs", headers=headers)
+        specs_resp.raise_for_status()
+        available = sorted(specs_resp.json().get("kernelspecs", {}))
+        if kernel_name not in available:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Kernelspec '{kernel_name}' is not installed on the "
+                    f"Jupyter server at {base_url}. "
+                    f"Available kernels: {', '.join(available) or '(none)'}."
+                ),
+            )
+
+        sessions_resp = await client.get(f"{base_url}/api/sessions", headers=headers)
+        sessions_resp.raise_for_status()
+        matching = [
+            session
+            for session in sessions_resp.json()
+            if session.get("path") == notebook_path
+        ]
+        if len(matching) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Notebook '{notebook_path}' has {len(matching)} Jupyter sessions; "
+                    "refusing to replace a kernel ambiguously."
+                ),
+            )
+
+        if matching:
+            old_session_id = matching[0]["id"]
+            deleted = await client.delete(
+                f"{base_url}/api/sessions/{old_session_id}",
+                headers=headers,
+            )
+            if deleted.status_code != 204:
+                raise HTTPException(
+                    status_code=deleted.status_code,
+                    detail=(
+                        f"Could not remove old session '{old_session_id}' before "
+                        f"switching '{notebook_path}' to '{kernel_name}': "
+                        f"{deleted.text[:500]}"
+                    ),
+                )
+
+        created = await client.post(
+            f"{base_url}/api/sessions",
+            json={
+                "path": notebook_path,
+                "name": notebook_path,
+                "type": "notebook",
+                "kernel": {"name": kernel_name},
+            },
+            headers=headers,
+        )
+        if created.status_code != 201:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Old session removed, but Jupyter could not start the requested "
+                    f"'{kernel_name}' replacement for '{notebook_path}': "
+                    f"{created.status_code} {created.text[:500]}. "
+                    "Call use_notebook to reconnect after correcting the kernel failure."
+                ),
+            )
+
+        replacement = created.json()
+
+    return replacement["kernel"]["id"], replacement["id"]
 
 
 # ---------------------------------------------------------------------------
@@ -1079,8 +1168,11 @@ async def get_execution_status(notebook_id: str) -> dict[str, Any]:
     response_model=RestartResponse,
     openapi_extra=_CONSEQUENTIAL_FALSE,
 )
-async def restart_notebook(notebook_id: str) -> dict[str, Any]:
-    """Restart the notebook's kernel."""
+async def restart_notebook(
+    notebook_id: str,
+    request: RestartNotebookRequest | None = None,
+) -> dict[str, Any]:
+    """Replace the notebook's session kernel; SageMath is the default."""
     if runtime.execution_is_running(notebook_id):
         kernel_id = runtime.notebooks.get_kernel_id(notebook_id)
         raise HTTPException(
@@ -1091,14 +1183,32 @@ async def restart_notebook(notebook_id: str) -> dict[str, Any]:
                 f"/v1/notebooks/{notebook_id}/execution until it is complete."
             ),
         )
-    try:
-        path, result = await runtime.run(
-            notebook_id,
-            lambda: RestartNotebookTool().execute(**_ctx(notebook_name=notebook_id)),
+    if notebook_id not in runtime.notebooks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Notebook '{notebook_id}' is not connected.",
         )
+
+    kernel_name = request.kernel_name if request is not None else "sagemath"
+    try:
+        async with runtime.lock:
+            path = decode_notebook_id(notebook_id)
+            kernel_id, session_id = await _replace_session_kernel(path, kernel_name)
+            runtime.notebooks.remove_notebook(notebook_id)
+            await runtime.activate(notebook_id, kernel_id=kernel_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _envelope(notebook_id, path, result=result)
+    return _envelope(
+        notebook_id,
+        path,
+        kernel_id=kernel_id,
+        kernel_name=kernel_name,
+        session_id=session_id,
+        result=(
+            f"Notebook '{notebook_id}' now has a fresh '{kernel_name}' kernel. "
+            "Memory state and imported packages have been cleared."
+        ),
+    )
 
 
 @app.post(
