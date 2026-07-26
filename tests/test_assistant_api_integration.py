@@ -145,7 +145,14 @@ def _cleanup_test_notebooks(jupyter_server: str):
     """Delete test notebooks from the Jupyter server after each test."""
     yield
     # Best-effort cleanup — failures here are not test failures.
-    for name in ("test-create.ipynb", "test-aba-a.ipynb", "test-aba-b.ipynb", "test-restart.ipynb"):
+    for name in (
+        "test-create.ipynb",
+        "test-aba-a.ipynb",
+        "test-aba-b.ipynb",
+        "test-restart.ipynb",
+        "test-session-reuse.ipynb",
+        "test-handoff.ipynb",
+    ):
         try:
             requests.delete(
                 f"{jupyter_server}/api/contents/{name}",
@@ -163,6 +170,13 @@ def _cleanup_test_notebooks(jupyter_server: str):
 
 def _nb_id(path: str) -> str:
     return encode_notebook_id(path)
+
+
+async def _jupyter_json(jupyter_server: str, path: str) -> list[dict]:
+    async with AsyncClient(base_url=jupyter_server, timeout=10) as jupyter:
+        response = await jupyter.get(path, params={"token": "MY_TOKEN"})
+        response.raise_for_status()
+        return response.json()
 
 
 # ---------------------------------------------------------------------------
@@ -566,3 +580,104 @@ async def test_10_jupyter_boundary_failure_is_legible(client: AsyncClient) -> No
     assert body["error_type"] == "ToolError", resp.text
     # The Jupyter 404 must survive, not collapse into a generic 500.
     assert body["http_status"] == HTTPStatus.NOT_FOUND, resp.text
+
+
+async def test_use_notebook_reuses_one_session_bound_kernel(
+    client: AsyncClient, jupyter_server: str
+) -> None:
+    path = "test-session-reuse.ipynb"
+
+    first = await client.post(
+        "/v1/notebooks/use",
+        json={"notebook_path": path, "mode": "create", "kernel_name": "python3"},
+    )
+    assert first.json()["ok"] is True, first.text
+    first_kernel = first.json()["kernel_id"]
+
+    sessions = await _jupyter_json(jupyter_server, "/api/sessions")
+    matching = [session for session in sessions if session["path"] == path]
+    assert len(matching) == 1
+    assert matching[0]["kernel"]["id"] == first_kernel
+
+    second = await client.post(
+        "/v1/notebooks/use",
+        json={"notebook_path": path, "mode": "connect", "kernel_name": "python3"},
+    )
+    assert second.json()["ok"] is True, second.text
+    assert second.json()["kernel_id"] == first_kernel
+    assert second.json()["kernel_reused"] is True
+
+    kernels = await _jupyter_json(jupyter_server, "/api/kernels")
+    assert sum(kernel["id"] == first_kernel for kernel in kernels) == 1
+
+
+async def test_execution_deadline_hands_off_without_interrupting_kernel(
+    client: AsyncClient,
+) -> None:
+    create = await client.post(
+        "/v1/notebooks/use",
+        json={
+            "notebook_path": "test-handoff.ipynb",
+            "mode": "create",
+            "kernel_name": "python3",
+        },
+    )
+    assert create.json()["ok"] is True, create.text
+    notebook_id = create.json()["notebook_id"]
+
+    started_at = time.monotonic()
+    response = await client.post(
+        f"/v1/notebooks/{notebook_id}/cells/insert-and-execute",
+        json={
+            "cell_index": 0,
+            "cell_source": "import time; time.sleep(2); print('handoff-finished')",
+            "handoff_after_seconds": 1,
+        },
+    )
+    elapsed = time.monotonic() - started_at
+    body = response.json()
+    assert response.status_code == HTTPStatus.OK
+    assert body["ok"] is True, response.text
+    assert body["status"] == "running"
+    assert elapsed < 1.8
+
+    restart = await client.post(f"/v1/notebooks/{notebook_id}/restart")
+    restart_body = restart.json()
+    assert restart.status_code == HTTPStatus.OK
+    assert restart_body["ok"] is False
+    assert restart_body["http_status"] == HTTPStatus.CONFLICT
+    assert "execution is still running" in restart_body["error_message"]
+    assert create.json()["kernel_id"] in restart_body["error_message"]
+
+    deadline = time.monotonic() + 10
+    while True:
+        status = await client.get(f"/v1/notebooks/{notebook_id}/execution")
+        status_body = status.json()
+        if status_body.get("status") == "complete":
+            break
+        assert status_body["status"] == "running", status.text
+        assert time.monotonic() < deadline
+        await asyncio.sleep(0.2)
+
+    assert "handoff-finished" in str(status_body["outputs"])
+
+
+async def test_use_notebook_rejects_kernelspec_mismatch(
+    client: AsyncClient,
+) -> None:
+    path = "test-session-reuse.ipynb"
+    first = await client.post(
+        "/v1/notebooks/use",
+        json={"notebook_path": path, "mode": "create", "kernel_name": "python3"},
+    )
+    assert first.json()["ok"] is True, first.text
+
+    mismatch = await client.post(
+        "/v1/notebooks/use",
+        json={"notebook_path": path, "mode": "connect", "kernel_name": "sagemath"},
+    )
+    body = mismatch.json()
+    assert mismatch.status_code == HTTPStatus.OK
+    assert body["ok"] is False
+    assert body["http_status"] == HTTPStatus.CONFLICT
+    assert "already has a 'python3' session kernel" in body["error_message"]
