@@ -618,7 +618,12 @@ async def execute_cell_thread_safe(notebook, cell_index, kernel):
                 ycell["execution_state"] = "idle"
 
 
-async def execute_cell_with_forced_sync(notebook, cell_index, kernel, timeout_seconds=300):
+async def execute_cell_with_forced_sync(
+    notebook,
+    cell_index,
+    kernel,
+    timeout_seconds: int | None = 300,
+):
     """Execute cell with forced real-time synchronization."""
     from jupyter_mcp_server.log import logger
 
@@ -633,7 +638,7 @@ async def execute_cell_with_forced_sync(notebook, cell_index, kernel, timeout_se
     while not execution_future.done():
         elapsed = time.time() - start_time
 
-        if elapsed > timeout_seconds:
+        if timeout_seconds is not None and elapsed > timeout_seconds:
             execution_future.cancel()
             try:
                 if hasattr(kernel, "interrupt"):

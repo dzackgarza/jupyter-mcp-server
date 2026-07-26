@@ -9,10 +9,9 @@ This module provides centralized management for Jupyter notebooks and kernels,
 replacing the scattered global variable approach with a unified architecture.
 """
 
-from collections.abc import Callable
 import asyncio
 import logging
-from typing import Dict, Any, Optional, Callable, Union
+from collections.abc import Callable
 from types import TracebackType
 from typing import Any
 
@@ -165,7 +164,10 @@ class NotebookManager:
                 # Only stop kernel if it's an HTTP KernelClient (MCP_SERVER mode)
                 # In JUPYTER_SERVER mode, kernel is just metadata, actual kernel managed elsewhere
                 if not is_local and kernel and hasattr(kernel, "stop"):
-                    kernel.stop()
+                    # MCP_SERVER kernels may be shared with a Jupyter session and
+                    # the user's browser. Disconnect this client without shutting
+                    # down the session-owned kernel.
+                    kernel.stop(shutdown_kernel=False)
             except Exception as e:
                 # Log kernel cleanup errors but don't block notebook removal.
                 # This is a cleanup operation — the user asked to remove the
@@ -284,22 +286,27 @@ class NotebookManager:
         Returns:
             True if restarted successfully, False otherwise
         """
-        if name in self._notebooks:
-            try:
-                kernel = self._notebooks[name]["kernel"]
-                if kernel and hasattr(kernel, "restart"):
-                    kernel.restart()
-                return True
-            except Exception as e:
-                logger.error(
-                    "Failed to restart kernel for notebook '%s': %s.%s: %s",
-                    name,
-                    type(e).__module__,
-                    type(e).__name__,
-                    e,
-                )
-                return False
-        return False
+        if name not in self._notebooks:
+            raise ValueError(f"Notebook '{name}' is not connected.")
+
+        kernel = self._notebooks[name].get("kernel")
+        kernel_id = self.get_kernel_id(name)
+        if kernel is None:
+            raise RuntimeError(
+                f"Notebook '{name}' has no kernel client (recorded kernel id: {kernel_id})."
+            )
+        if not hasattr(kernel, "restart"):
+            raise RuntimeError(
+                f"Kernel '{kernel_id}' for notebook '{name}' does not expose restart()."
+            )
+        try:
+            kernel.restart()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Kernel '{kernel_id}' restart failed for notebook '{name}': "
+                f"{type(exc).__module__}.{type(exc).__name__}: {exc}"
+            ) from exc
+        return True
 
     def is_empty(self) -> bool:
         """Check if the manager is empty (no notebooks)."""

@@ -134,12 +134,24 @@ class RestartNotebookTool(BaseTool):
                 ) from e
 
         elif mode == ServerMode.MCP_SERVER:
-            # MCP_SERVER mode: Use notebook_manager's restart_notebook method
-            success = notebook_manager.restart_notebook(notebook_name)
-
-            if success:
-                return f"Notebook '{notebook_name}' kernel restarted successfully. Memory state and imported packages have been cleared."
-            else:
-                raise ToolError(f"[restart_notebook] Failed to restart notebook '{notebook_name}'. The kernel may not support restart operation.")
+            kernel_id = notebook_manager.get_kernel_id(notebook_name)
+            try:
+                notebook_manager.restart_notebook(notebook_name)
+            except Exception as exc:
+                raise ToolError(
+                    format_tool_error(
+                        "restart_notebook",
+                        f"restart kernel '{kernel_id}' for notebook '{notebook_name}'",
+                        exc,
+                        context={
+                            "notebook_name": notebook_name,
+                            "kernel_id": kernel_id,
+                        },
+                    )
+                ) from exc
+            return (
+                f"Notebook '{notebook_name}' kernel '{kernel_id}' restarted successfully. "
+                "Memory state and imported packages have been cleared."
+            )
         else:
             raise ToolError(f"[restart_notebook] Invalid mode: {mode}")

@@ -35,7 +35,9 @@ EXPECTED_OPERATION_IDS = {
     "execute_cell",
     "insert_execute_code_cell",
     "execute_code",
+    "get_execution_status",
     "restart_notebook",
+    "unuse_notebook",
 }
 
 MUTATION_OPERATION_IDS = {
@@ -50,6 +52,7 @@ MUTATION_OPERATION_IDS = {
     "insert_execute_code_cell",
     "execute_code",
     "restart_notebook",
+    "unuse_notebook",
 }
 
 

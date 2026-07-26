@@ -11,7 +11,7 @@ from mcp.types import ImageContent
 
 from jupyter_mcp_server.hooks import HookEvent, HookRegistry
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
+from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +131,7 @@ class ExecuteCodeTool(BaseTool):
         kernel,
         kid: str,
         code: str,
-        timeout: int,
+        timeout: int | None,
         wait_for_kernel_idle_fn,
         safe_extract_outputs_fn,
     ) -> list[str | ImageContent]:
@@ -155,7 +155,10 @@ class ExecuteCodeTool(BaseTool):
 
             # Wait for execution with timeout
             try:
-                outputs = await asyncio.wait_for(execution_task, timeout=timeout)
+                if timeout is None:
+                    outputs = await execution_task
+                else:
+                    outputs = await asyncio.wait_for(execution_task, timeout=timeout)
             except asyncio.TimeoutError as e:
                 execution_task.cancel()
                 try:
@@ -220,7 +223,7 @@ class ExecuteCodeTool(BaseTool):
         notebook_manager=None,
         # Tool-specific parameters
         code: str = None,
-        timeout: int = 60,
+        timeout: int | None = 60,
         kernel_id: str = None,
         ensure_kernel_alive_fn=None,
         wait_for_kernel_idle_fn=None,

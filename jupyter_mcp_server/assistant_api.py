@@ -24,15 +24,15 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from jupyter_mcp_server.assistant_runtime import (
     AssistantRuntime,
     configure_jupyter,
 )
 from jupyter_mcp_server.config import get_config
-from jupyter_mcp_server.notebook_id import encode_notebook_id, decode_notebook_id
+from jupyter_mcp_server.notebook_id import decode_notebook_id, encode_notebook_id
 from jupyter_mcp_server.tools import (
     ClearCellOutputTool,
     DeleteCellTool,
@@ -47,6 +47,7 @@ from jupyter_mcp_server.tools import (
     ReadCellTool,
     ReadNotebookTool,
     RestartNotebookTool,
+    UnuseNotebookTool,
 )
 from jupyter_mcp_server.utils import (
     safe_extract_outputs,
@@ -237,7 +238,12 @@ class InsertCellRequest(BaseModel):
 class InsertExecuteRequest(BaseModel):
     cell_index: int = Field(-1, ge=-1, description="0-based index; -1 means append")
     cell_source: str = Field(...)
-    timeout: int = Field(35, ge=1, le=40, description="Max seconds to wait for execution")
+    handoff_after_seconds: int = Field(
+        35,
+        ge=1,
+        le=40,
+        description="Seconds to wait before returning status=running; execution continues",
+    )
 
 
 class OverwriteCellSourceRequest(BaseModel):
@@ -261,12 +267,22 @@ class MoveCellRequest(BaseModel):
 
 
 class ExecuteCellRequest(BaseModel):
-    timeout: int = Field(35, ge=1, le=40, description="Max seconds to wait for execution")
+    handoff_after_seconds: int = Field(
+        35,
+        ge=1,
+        le=40,
+        description="Seconds to wait before returning status=running; execution continues",
+    )
 
 
 class ExecuteCodeRequest(BaseModel):
     code: str = Field(...)
-    timeout: int = Field(35, ge=1, le=40)
+    handoff_after_seconds: int = Field(
+        35,
+        ge=1,
+        le=40,
+        description="Seconds to wait before returning status=running; execution continues",
+    )
 
 
 class ReadNotebookQuery(BaseModel):
@@ -302,6 +318,8 @@ class UseNotebookResponse(BaseModel):
     notebook_path: str
     kernel_id: str | None = None
     kernel_name: str | None = None
+    session_id: str | None = None
+    kernel_reused: bool
     mode: str
 
 
@@ -324,7 +342,12 @@ class CellOutputsResponse(BaseModel):
     ok: bool
     notebook_id: str
     notebook_path: str
-    cell_index: int
+    cell_index: int | None = None
+    status: Literal["running", "complete"]
+    operation: str
+    kernel_id: str | None = None
+    poll_after_seconds: int | None = None
+    instruction: str | None = None
     outputs: Any = None
 
 
@@ -332,6 +355,25 @@ class ExecuteOutputsResponse(BaseModel):
     ok: bool
     notebook_id: str
     notebook_path: str
+    status: Literal["running", "complete"]
+    operation: str
+    kernel_id: str | None = None
+    poll_after_seconds: int | None = None
+    instruction: str | None = None
+    outputs: Any = None
+
+
+class ExecutionStatusResponse(BaseModel):
+    ok: bool
+    notebook_id: str
+    notebook_path: str
+    status: Literal["running", "complete"]
+    operation: str
+    cell_index: int | None = None
+    kernel_id: str | None = None
+    elapsed_seconds: float | None = None
+    poll_after_seconds: int | None = None
+    instruction: str | None = None
     outputs: Any = None
 
 
@@ -361,6 +403,14 @@ class RestartResponse(BaseModel):
     ok: bool
     notebook_id: str
     notebook_path: str
+    result: Any = None
+
+
+class UnuseNotebookResponse(BaseModel):
+    ok: bool
+    notebook_id: str
+    notebook_path: str
+    kernel_id: str | None = None
     result: Any = None
 
 
@@ -394,38 +444,65 @@ def _envelope(notebook_id: str, path: str, **extra: Any) -> dict[str, Any]:
     return env
 
 
-async def _start_kernel_with_spec(kernel_name: str) -> str:
-    """Start a kernel with the given kernelspec name via the Jupyter REST API.
-
-    The upstream ``UseNotebookTool`` accepts a pre-existing ``kernel_id``
-    and connects to it instead of starting a new one.  This helper bridges
-    the gap: it starts the kernel with the desired kernelspec via the
-    Jupyter server's REST API, then returns the kernel id for
-    ``UseNotebookTool`` to connect to.
-
-    Returns
-    -------
-    str
-        The kernel id of the newly started kernel.
-
-    Raises
-    ------
-    HTTPException
-        If the kernelspec is not installed on the server, or the kernel
-        could not be started (HTTP 400).
-    """
-    import httpx
-
+def _jupyter_connection() -> tuple[str, dict[str, str]]:
+    """Return the configured Jupyter URL and authentication headers."""
     config = get_config()
     base_url = config.runtime_url or "http://localhost:8888"
     token = config.runtime_token
     headers = {} if not token else {"Authorization": f"token {token}"}
+    return base_url.rstrip("/"), headers
 
+
+async def _ensure_notebook_file(notebook_path: str, *, create: bool) -> None:
+    """Ensure a notebook exists before creating its Jupyter session."""
+    import httpx
+
+    base_url, headers = _jupyter_connection()
+    contents_url = f"{base_url}/api/contents/{notebook_path}"
     async with httpx.AsyncClient(timeout=30) as client:
-        # Check the kernelspec exists before asking for a kernel.  Jupyter
-        # accepts the request for an uninstalled spec, then crash-loops the
-        # launch five times and fails the websocket handshake with a bare
-        # 500 a minute later — by which point the real cause is gone.
+        response = await client.get(contents_url, headers=headers)
+        if response.status_code == 200:
+            return
+        if response.status_code != 404:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Could not inspect notebook '{notebook_path}': {response.text[:500]}",
+            )
+        if not create:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Notebook '{notebook_path}' does not exist on the Jupyter server.",
+            )
+        created = await client.put(
+            contents_url,
+            headers=headers,
+            json={
+                "type": "notebook",
+                "format": "json",
+                "content": {
+                    "cells": [],
+                    "metadata": {},
+                    "nbformat": 4,
+                    "nbformat_minor": 5,
+                },
+            },
+        )
+    if created.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=created.status_code,
+            detail=f"Failed to create notebook '{notebook_path}': {created.text[:500]}",
+        )
+
+
+async def _get_or_create_session_kernel(
+    notebook_path: str,
+    kernel_name: str,
+) -> tuple[str, str, bool]:
+    """Reuse the notebook's Jupyter session kernel or create one bound session."""
+    import httpx
+
+    base_url, headers = _jupyter_connection()
+    async with httpx.AsyncClient(timeout=30) as client:
         specs_resp = await client.get(f"{base_url}/api/kernelspecs", headers=headers)
         if specs_resp.status_code == 200:
             available = sorted(specs_resp.json().get("kernelspecs", {}))
@@ -439,9 +516,45 @@ async def _start_kernel_with_spec(kernel_name: str) -> str:
                     ),
                 )
 
+        sessions_resp = await client.get(f"{base_url}/api/sessions", headers=headers)
+        sessions_resp.raise_for_status()
+        matching = [
+            session
+            for session in sessions_resp.json()
+            if session.get("path") == notebook_path
+        ]
+        if len(matching) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Notebook '{notebook_path}' has {len(matching)} Jupyter sessions; "
+                    "refusing to choose a kernel ambiguously."
+                ),
+            )
+        if matching:
+            session = matching[0]
+            kernel = session["kernel"]
+            active_name = kernel.get("name")
+            if active_name != kernel_name:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Notebook '{notebook_path}' already has a '{active_name}' "
+                        f"session kernel ({kernel.get('id')}); requested '{kernel_name}'. "
+                        "Select the active kernelspec or explicitly restart the notebook "
+                        "with a different kernel."
+                    ),
+                )
+            return kernel["id"], session["id"], True
+
         resp = await client.post(
-            f"{base_url}/api/kernels",
-            json={"name": kernel_name},
+            f"{base_url}/api/sessions",
+            json={
+                "path": notebook_path,
+                "name": notebook_path,
+                "type": "notebook",
+                "kernel": {"name": kernel_name},
+            },
             headers=headers,
         )
 
@@ -449,10 +562,14 @@ async def _start_kernel_with_spec(kernel_name: str) -> str:
         detail = resp.text[:500]
         raise HTTPException(
             status_code=400,
-            detail=f"Failed to start kernel '{kernel_name}': {resp.status_code} {detail}",
+            detail=(
+                f"Failed to create a Jupyter session for '{notebook_path}' "
+                f"with kernel '{kernel_name}': {resp.status_code} {detail}"
+            ),
         )
 
-    return resp.json()["id"]
+    session = resp.json()
+    return session["kernel"]["id"], session["id"], False
 
 
 # ---------------------------------------------------------------------------
@@ -559,16 +676,19 @@ async def use_notebook(request: UseNotebookRequest) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Pre-start a kernel with the requested kernelspec, then pass its
-    # kernel_id to UseNotebookTool so it connects to it instead of
-    # starting a new one with the default (python3) kernelspec.
-    kernel_id = await _start_kernel_with_spec(request.kernel_name)
-
     async with runtime.lock:
+        await _ensure_notebook_file(
+            request.notebook_path,
+            create=(request.mode == "create"),
+        )
+        kernel_id, session_id, kernel_reused = await _get_or_create_session_kernel(
+            request.notebook_path,
+            request.kernel_name,
+        )
         try:
             path = await runtime.activate(
                 notebook_id,
-                create=(request.mode == "create"),
+                create=False,
                 kernel_id=kernel_id,
             )
         except ValueError as exc:
@@ -580,6 +700,8 @@ async def use_notebook(request: UseNotebookRequest) -> dict[str, Any]:
             path,
             kernel_id=actual_kernel_id,
             kernel_name=request.kernel_name,
+            session_id=session_id,
+            kernel_reused=kernel_reused,
             mode=request.mode,
         )
 
@@ -829,21 +951,24 @@ async def execute_cell(
 ) -> dict[str, Any]:
     """Execute a cell by index and return its outputs."""
     try:
-        path, result = await runtime.run(
+        path, state = await runtime.start_execution(
             notebook_id,
             lambda: ExecuteCellTool().execute(
                 **_ctx(
                     cell_index=cell_index,
-                    timeout_seconds=request.timeout,
+                    timeout_seconds=None,
                     stream=False,
                     progress_interval=0,
                     ensure_kernel_alive_fn=runtime.ensure_kernel_alive,
                 )
             ),
+            operation_name="execute_cell",
+            cell_index=cell_index,
+            handoff_after_seconds=request.handoff_after_seconds,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _envelope(notebook_id, path, cell_index=cell_index, outputs=result)
+    return _envelope(notebook_id, path, **state)
 
 
 @app.post(
@@ -861,40 +986,40 @@ async def insert_execute_code_cell(
     Mirrors the existing MCP wrapper: InsertCellTool then ExecuteCellTool
     on the same index, with one retry on the execution step.
     """
-    try:
-        async with runtime.lock:
-            path = await runtime.activate(notebook_id)
-
-            await safe_notebook_operation(
-                lambda: InsertCellTool().execute(
-                    **_ctx(
-                        cell_index=request.cell_index,
-                        cell_type="code",
-                        cell_source=request.cell_source,
-                    )
+    async def _insert_and_execute() -> Any:
+        await safe_notebook_operation(
+            lambda: InsertCellTool().execute(
+                **_ctx(
+                    cell_index=request.cell_index,
+                    cell_type="code",
+                    cell_source=request.cell_source,
                 )
             )
+        )
+        return await safe_notebook_operation(
+            lambda: ExecuteCellTool().execute(
+                **_ctx(
+                    cell_index=request.cell_index,
+                    timeout_seconds=None,
+                    stream=False,
+                    progress_interval=0,
+                    ensure_kernel_alive_fn=runtime.ensure_kernel_alive,
+                )
+            ),
+            max_retries=1,
+        )
 
-            result = await safe_notebook_operation(
-                lambda: ExecuteCellTool().execute(
-                    **_ctx(
-                        cell_index=request.cell_index,
-                        timeout_seconds=request.timeout,
-                        stream=False,
-                        progress_interval=0,
-                        ensure_kernel_alive_fn=runtime.ensure_kernel_alive,
-                    )
-                ),
-                max_retries=1,
-            )
+    try:
+        path, state = await runtime.start_execution(
+            notebook_id,
+            _insert_and_execute,
+            operation_name="insert_execute_code_cell",
+            cell_index=request.cell_index,
+            handoff_after_seconds=request.handoff_after_seconds,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _envelope(
-        notebook_id,
-        path,
-        cell_index=request.cell_index,
-        outputs=result,
-    )
+    return _envelope(notebook_id, path, **state)
 
 
 @app.post(
@@ -909,21 +1034,38 @@ async def execute_code(
 ) -> dict[str, Any]:
     """Execute temporary code in the notebook's kernel without inserting a cell."""
     try:
-        path, result = await runtime.run(
+        path, state = await runtime.start_execution(
             notebook_id,
             lambda: ExecuteCodeTool().execute(
                 **_ctx(
                     code=request.code,
-                    timeout=request.timeout,
+                    timeout=None,
                     ensure_kernel_alive_fn=runtime.ensure_kernel_alive,
                     wait_for_kernel_idle_fn=wait_for_kernel_idle,
                     safe_extract_outputs_fn=safe_extract_outputs,
                 )
             ),
+            operation_name="execute_code",
+            cell_index=None,
+            handoff_after_seconds=request.handoff_after_seconds,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _envelope(notebook_id, path, outputs=result)
+    return _envelope(notebook_id, path, **state)
+
+
+@app.get(
+    "/v1/notebooks/{notebook_id}/execution",
+    operation_id="get_execution_status",
+    response_model=ExecutionStatusResponse,
+)
+async def get_execution_status(notebook_id: str) -> dict[str, Any]:
+    """Poll execution state without waiting for the notebook operation lock."""
+    try:
+        path, state = runtime.execution_status(notebook_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _envelope(notebook_id, path, **state)
 
 
 # ---------------------------------------------------------------------------
@@ -939,6 +1081,16 @@ async def execute_code(
 )
 async def restart_notebook(notebook_id: str) -> dict[str, Any]:
     """Restart the notebook's kernel."""
+    if runtime.execution_is_running(notebook_id):
+        kernel_id = runtime.notebooks.get_kernel_id(notebook_id)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot restart notebook '{notebook_id}' because an execution is still "
+                f"running on kernel '{kernel_id}'. Poll "
+                f"/v1/notebooks/{notebook_id}/execution until it is complete."
+            ),
+        )
     try:
         path, result = await runtime.run(
             notebook_id,
@@ -947,6 +1099,39 @@ async def restart_notebook(notebook_id: str) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, result=result)
+
+
+@app.post(
+    "/v1/notebooks/{notebook_id}/unuse",
+    operation_id="unuse_notebook",
+    response_model=UnuseNotebookResponse,
+    openapi_extra=_CONSEQUENTIAL_FALSE,
+)
+async def unuse_notebook(notebook_id: str) -> dict[str, Any]:
+    """Disconnect the Assistant API client without shutting down the session kernel."""
+    if runtime.execution_is_running(notebook_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot unuse notebook '{notebook_id}' while its execution is running. "
+                f"Poll /v1/notebooks/{notebook_id}/execution until it is complete."
+            ),
+        )
+    path = decode_notebook_id(notebook_id)
+    kernel_id = runtime.notebooks.get_kernel_id(notebook_id)
+    async with runtime.lock:
+        result = await safe_notebook_operation(
+            lambda: UnuseNotebookTool().execute(
+                **_ctx(notebook_name=notebook_id)
+            )
+        )
+    runtime.pending_executions.pop(notebook_id, None)
+    return _envelope(
+        notebook_id,
+        path,
+        kernel_id=kernel_id,
+        result=result,
+    )
 
 
 # ---------------------------------------------------------------------------

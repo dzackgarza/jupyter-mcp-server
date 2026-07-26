@@ -141,18 +141,46 @@ def assistant_api_url(jupyter_server: str) -> Generator[str]:
 
 
 @pytest.fixture(autouse=True)
-def _cleanup_test_notebooks(jupyter_server: str):
+def _cleanup_test_notebooks(jupyter_server: str, assistant_api_url: str):
     """Delete test notebooks from the Jupyter server after each test."""
     yield
-    # Best-effort cleanup — failures here are not test failures.
-    for name in (
+    names = (
         "test-create.ipynb",
         "test-aba-a.ipynb",
         "test-aba-b.ipynb",
         "test-restart.ipynb",
         "test-session-reuse.ipynb",
         "test-handoff.ipynb",
-    ):
+    )
+    for name in names:
+        try:
+            requests.post(
+                f"{assistant_api_url}/v1/notebooks/{_nb_id(name)}/unuse",
+                timeout=5,
+            )
+        except Exception:
+            pass
+    time.sleep(0.5)
+
+    # Close session-owned kernels before deleting their notebook files.
+    try:
+        sessions = requests.get(
+            f"{jupyter_server}/api/sessions",
+            params={"token": "MY_TOKEN"},
+            timeout=5,
+        ).json()
+        for session in sessions:
+            if session.get("path") in names:
+                requests.delete(
+                    f"{jupyter_server}/api/sessions/{session['id']}",
+                    params={"token": "MY_TOKEN"},
+                    timeout=5,
+                )
+    except Exception:
+        pass
+
+    # Best-effort file cleanup — failures here are not test failures.
+    for name in names:
         try:
             requests.delete(
                 f"{jupyter_server}/api/contents/{name}",
@@ -233,7 +261,7 @@ async def test_3_insert_and_execute_cell(client: AsyncClient) -> None:
 
     resp = await client.post(
         f"/v1/notebooks/{nb_id}/cells/insert-and-execute",
-        json={"cell_index": 0, "cell_source": "print(2 + 2)", "timeout": 35},
+        json={"cell_index": 0, "cell_source": "print(2 + 2)", "handoff_after_seconds": 35},
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -256,7 +284,7 @@ async def test_4_read_cell_source_and_output(client: AsyncClient) -> None:
 
     await client.post(
         f"/v1/notebooks/{nb_id}/cells/insert-and-execute",
-        json={"cell_index": 0, "cell_source": "print(42)", "timeout": 35},
+        json={"cell_index": 0, "cell_source": "print(42)", "handoff_after_seconds": 35},
     )
 
     resp = await client.get(f"/v1/notebooks/{nb_id}/cells/0")
@@ -283,14 +311,14 @@ async def test_5_kernel_continuity(client: AsyncClient) -> None:
     # Set a variable
     r1 = await client.post(
         f"/v1/notebooks/{nb_id}/execute-code",
-        json={"code": "x = 42", "timeout": 10},
+        json={"code": "x = 42", "handoff_after_seconds": 10},
     )
     assert r1.json()["ok"] is True, r1.text
 
     # Read it in a separate request
     r2 = await client.post(
         f"/v1/notebooks/{nb_id}/execute-code",
-        json={"code": "print(x * 2)", "timeout": 10},
+        json={"code": "print(x * 2)", "handoff_after_seconds": 10},
     )
     assert r2.status_code == 200
     data = r2.json()
@@ -318,21 +346,21 @@ async def test_6_aba_interleaving(client: AsyncClient) -> None:
     # A: set x = 100
     a_set = await client.post(
         f"/v1/notebooks/{a_id}/execute-code",
-        json={"code": "x = 100", "timeout": 10},
+        json={"code": "x = 100", "handoff_after_seconds": 10},
     )
     assert a_set.json()["ok"] is True, a_set.text
 
     # B: set x = 200
     b_set = await client.post(
         f"/v1/notebooks/{b_id}/execute-code",
-        json={"code": "x = 200", "timeout": 10},
+        json={"code": "x = 200", "handoff_after_seconds": 10},
     )
     assert b_set.json()["ok"] is True, b_set.text
 
     # A: read x — must be 100, not 200
     a_read = await client.post(
         f"/v1/notebooks/{a_id}/execute-code",
-        json={"code": "print(x)", "timeout": 10},
+        json={"code": "print(x)", "handoff_after_seconds": 10},
     )
     assert a_read.status_code == 200
     assert "100" in str(a_read.json()["outputs"])
@@ -340,7 +368,7 @@ async def test_6_aba_interleaving(client: AsyncClient) -> None:
     # B: read x — must be 200
     b_read = await client.post(
         f"/v1/notebooks/{b_id}/execute-code",
-        json={"code": "print(x)", "timeout": 10},
+        json={"code": "print(x)", "handoff_after_seconds": 10},
     )
     assert b_read.status_code == 200
     assert "200" in str(b_read.json()["outputs"])
@@ -419,7 +447,7 @@ def test_7_reconnect_after_adapter_restart(jupyter_server: str) -> None:
 
         r = requests.post(
             f"{url1}/v1/notebooks/{nb_id}/execute-code",
-            json={"code": "y = 'persisted'", "timeout": 10},
+            json={"code": "y = 'persisted'", "handoff_after_seconds": 10},
             timeout=30,
         )
         assert r.json()["ok"] is True, r.text
@@ -478,7 +506,7 @@ async def test_8_failed_activation_returns_client_error(client: AsyncClient) -> 
     # Set a variable in the real notebook.
     await client.post(
         f"/v1/notebooks/{real_id}/execute-code",
-        json={"code": "guard = 'real'", "timeout": 10},
+        json={"code": "guard = 'real'", "handoff_after_seconds": 10},
     )
 
     # Now attempt to activate a non-existent notebook in connect mode.
@@ -503,7 +531,7 @@ async def test_8_failed_activation_returns_client_error(client: AsyncClient) -> 
     async with AsyncClient(base_url=str(client.base_url), timeout=60) as fresh:
         r = await fresh.post(
             f"/v1/notebooks/{real_id}/execute-code",
-            json={"code": "print(guard)", "timeout": 10},
+            json={"code": "print(guard)", "handoff_after_seconds": 10},
         )
     assert r.json()["ok"] is True, r.text
     assert "real" in str(r.json()["outputs"]), r.text
@@ -528,14 +556,14 @@ async def test_9_concurrent_operations_serialized(client: AsyncClient) -> None:
     async def _set() -> dict:
         r = await client.post(
             f"/v1/notebooks/{nb_id}/execute-code",
-            json={"code": "counter = 99", "timeout": 10},
+            json={"code": "counter = 99", "handoff_after_seconds": 10},
         )
         return r.json()
 
     async def _read() -> dict:
         r = await client.post(
             f"/v1/notebooks/{nb_id}/execute-code",
-            json={"code": "print(counter)", "timeout": 10},
+            json={"code": "print(counter)", "handoff_after_seconds": 10},
         )
         return r.json()
 
@@ -610,6 +638,20 @@ async def test_use_notebook_reuses_one_session_bound_kernel(
     kernels = await _jupyter_json(jupyter_server, "/api/kernels")
     assert sum(kernel["id"] == first_kernel for kernel in kernels) == 1
 
+    unused = await client.post(f"/v1/notebooks/{first.json()['notebook_id']}/unuse")
+    assert unused.json()["ok"] is True, unused.text
+    assert unused.json()["kernel_id"] == first_kernel
+
+    kernels_after_unuse = await _jupyter_json(jupyter_server, "/api/kernels")
+    assert any(kernel["id"] == first_kernel for kernel in kernels_after_unuse)
+
+    reconnected = await client.post(
+        "/v1/notebooks/use",
+        json={"notebook_path": path, "mode": "connect", "kernel_name": "python3"},
+    )
+    assert reconnected.json()["kernel_id"] == first_kernel
+    assert reconnected.json()["kernel_reused"] is True
+
 
 async def test_execution_deadline_hands_off_without_interrupting_kernel(
     client: AsyncClient,
@@ -641,6 +683,21 @@ async def test_execution_deadline_hands_off_without_interrupting_kernel(
     assert body["status"] == "running"
     assert elapsed < 1.8
 
+    duplicate_started_at = time.monotonic()
+    duplicate = await client.post(
+        f"/v1/notebooks/{notebook_id}/cells/insert-and-execute",
+        json={
+            "cell_index": -1,
+            "cell_source": "print('must-not-be-queued')",
+            "handoff_after_seconds": 1,
+        },
+    )
+    duplicate_body = duplicate.json()
+    assert duplicate_body["status"] == "running"
+    assert duplicate_body["cell_index"] == 0
+    assert duplicate_body["operation"] == "insert_execute_code_cell"
+    assert time.monotonic() - duplicate_started_at < 0.5
+
     restart = await client.post(f"/v1/notebooks/{notebook_id}/restart")
     restart_body = restart.json()
     assert restart.status_code == HTTPStatus.OK
@@ -660,6 +717,8 @@ async def test_execution_deadline_hands_off_without_interrupting_kernel(
         await asyncio.sleep(0.2)
 
     assert "handoff-finished" in str(status_body["outputs"])
+    notebook = await client.get(f"/v1/notebooks/{notebook_id}")
+    assert "must-not-be-queued" not in str(notebook.json())
 
 
 async def test_use_notebook_rejects_kernelspec_mismatch(

@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from jupyter_mcp_server.config import get_config, set_config
@@ -37,6 +39,16 @@ from jupyter_mcp_server.utils import (
 )
 
 __all__ = ["AssistantRuntime", "configure_jupyter"]
+
+
+@dataclass
+class PendingExecution:
+    """One notebook execution that may outlive its initiating HTTP request."""
+
+    task: asyncio.Task[tuple[str, Any]]
+    operation: str
+    cell_index: int | None
+    started_at: float
 
 
 def configure_jupyter() -> None:
@@ -70,6 +82,7 @@ class AssistantRuntime:
         self.notebooks = NotebookManager()
         self.context = ServerContext.get_instance()
         self.lock = asyncio.Lock()
+        self.pending_executions: dict[str, PendingExecution] = {}
 
     # ------------------------------------------------------------------
     # Kernel health
@@ -162,3 +175,83 @@ class AssistantRuntime:
             path = await self.activate(notebook_id, create=create)
             result = await safe_notebook_operation(operation)
             return path, result
+
+    # ------------------------------------------------------------------
+    # Long-running execution handoff
+    # ------------------------------------------------------------------
+
+    def _execution_payload(
+        self,
+        notebook_id: str,
+        pending: PendingExecution,
+    ) -> tuple[str, dict[str, Any]]:
+        path = decode_notebook_id(notebook_id)
+        base: dict[str, Any] = {
+            "operation": pending.operation,
+            "cell_index": pending.cell_index,
+            "kernel_id": self.notebooks.get_kernel_id(notebook_id),
+        }
+        if not pending.task.done():
+            return path, {
+                **base,
+                "status": "running",
+                "elapsed_seconds": round(time.monotonic() - pending.started_at, 1),
+                "poll_after_seconds": 5,
+                "instruction": (
+                    f"Execution is still running. Check "
+                    f"/v1/notebooks/{notebook_id}/execution again in about 5 seconds."
+                ),
+            }
+
+        completed_path, result = pending.task.result()
+        return completed_path, {
+            **base,
+            "status": "complete",
+            "outputs": result,
+        }
+
+    def execution_status(self, notebook_id: str) -> tuple[str, dict[str, Any]]:
+        """Return tracked execution state without waiting for the runtime lock."""
+        pending = self.pending_executions.get(notebook_id)
+        if pending is None:
+            raise ValueError(f"Notebook '{notebook_id}' has no tracked execution.")
+        return self._execution_payload(notebook_id, pending)
+
+    def execution_is_running(self, notebook_id: str) -> bool:
+        pending = self.pending_executions.get(notebook_id)
+        return pending is not None and not pending.task.done()
+
+    async def start_execution(
+        self,
+        notebook_id: str,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        operation_name: str,
+        cell_index: int | None,
+        handoff_after_seconds: int,
+    ) -> tuple[str, dict[str, Any]]:
+        """Start one serialized execution and hand it off at the HTTP deadline."""
+        pending = self.pending_executions.get(notebook_id)
+        if pending is not None and not pending.task.done():
+            return self._execution_payload(notebook_id, pending)
+
+        task = asyncio.create_task(
+            self.run(notebook_id, operation),
+            name=f"assistant-{operation_name}-{notebook_id}",
+        )
+        pending = PendingExecution(
+            task=task,
+            operation=operation_name,
+            cell_index=cell_index,
+            started_at=time.monotonic(),
+        )
+        self.pending_executions[notebook_id] = pending
+
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=handoff_after_seconds,
+            )
+        except asyncio.TimeoutError:
+            pass
+        return self._execution_payload(notebook_id, pending)

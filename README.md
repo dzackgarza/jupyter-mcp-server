@@ -53,8 +53,9 @@ All routes are served under `https://jupyter-assistant.dzackgarza.com`. The full
 
 | Method | Path | Operation ID | Description |
 |---|---|---|---|
-| POST | `/v1/notebooks/use` | `use_notebook` | Open or create a notebook (requires `notebook_path`, optional `kernel_name` defaults to `sagemath`) |
+| POST | `/v1/notebooks/use` | `use_notebook` | Open or create a notebook and reuse its session-bound kernel |
 | POST | `/v1/notebooks/{notebook_id}/restart` | `restart_notebook` | Restart the notebook's kernel |
+| POST | `/v1/notebooks/{notebook_id}/unuse` | `unuse_notebook` | Disconnect the Assistant client without shutting down the shared session kernel |
 
 ### Reading
 
@@ -81,6 +82,17 @@ All routes are served under `https://jupyter-assistant.dzackgarza.com`. The full
 | POST | `/v1/notebooks/{notebook_id}/cells/{cell_index}/execute` | `execute_cell` | Execute a cell by index |
 | POST | `/v1/notebooks/{notebook_id}/cells/insert-and-execute` | `insert_execute_code_cell` | Insert + execute a code cell in one step |
 | POST | `/v1/notebooks/{notebook_id}/execute-code` | `execute_code` | Execute temporary code without inserting a cell |
+| GET | `/v1/notebooks/{notebook_id}/execution` | `get_execution_status` | Poll a handed-off execution without waiting for the notebook lock |
+
+Execution requests accept `handoff_after_seconds` (default `35`, maximum `40`). If
+the computation finishes before that deadline, the response contains
+`status: "complete"` and inline outputs. Otherwise, the response remains HTTP 200,
+contains `status: "running"`, and tells the caller when and where to poll. The
+kernel continues computing.
+
+`use_notebook` reuses the Jupyter session already bound to the notebook path. If
+the requested kernelspec differs from the active session's kernelspec, the API
+returns an actionable conflict instead of silently selecting the wrong interpreter.
 
 ---
 
@@ -133,6 +145,8 @@ Rules:
 - Read the notebook before editing to understand its structure
 - Use brief format for read_notebook unless you need full output details
 - Cell indices are 0-based; -1 means append
+- When execution returns status "running", wait for poll_after_seconds, then call get_execution_status
+- Do not restart or rebind a notebook while its execution status is "running"
 ```
 
 ### 5. Test it

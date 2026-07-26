@@ -141,7 +141,7 @@ class ExecuteCellTool(BaseTool):
         serverapp=None,
         # Tool-specific parameters
         cell_index: int = None,
-        timeout_seconds: int = 60,
+        timeout_seconds: int | None = 60,
         stream: bool = False,
         progress_interval: int = 5,
         ensure_kernel_alive_fn=None,
@@ -339,7 +339,7 @@ class ExecuteCellTool(BaseTool):
                         elapsed = time.time() - start_time
 
                         # Check timeout
-                        if elapsed > timeout_seconds:
+                        if timeout_seconds is not None and elapsed > timeout_seconds:
                             execution_task.cancel()
                             timed_out = True
                             outputs_log.append(f"[TIMEOUT at {elapsed:.1f}s: Cancelling execution]")
@@ -415,9 +415,12 @@ class ExecuteCellTool(BaseTool):
 
                 else:
                     # Non-streaming mode: Use forced synchronization
-                    logger.info(
-                        f"Starting execution of cell {cell_index} with {timeout_seconds}s timeout"
+                    deadline = (
+                        f"{timeout_seconds}s timeout"
+                        if timeout_seconds is not None
+                        else "no execution deadline"
                     )
+                    logger.info(f"Starting execution of cell {cell_index} with {deadline}")
 
                     try:
                         # Use the forced sync function
