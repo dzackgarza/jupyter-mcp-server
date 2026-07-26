@@ -201,6 +201,16 @@ class NotebookManager:
             return True
         return False
 
+    def forget_notebook(self, name: str) -> bool:
+        """Drop app-side state after Jupyter has terminated the session."""
+        if name not in self._notebooks:
+            return False
+        del self._notebooks[name]
+        if self._current_notebook.get() == name:
+            replacement = next(iter(self._notebooks), None)
+            self._current_notebook.set(replacement)
+        return True
+
     def get_kernel(self, name: str) -> KernelClient | dict[str, Any] | None:
         """
         Get the kernel for a specific notebook.

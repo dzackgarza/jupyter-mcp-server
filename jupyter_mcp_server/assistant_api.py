@@ -427,13 +427,16 @@ class ExecutionStatusResponse(BaseModel):
     ok: bool
     notebook_id: str
     notebook_path: str
-    status: Literal["running", "complete"]
+    status: Literal["running", "complete", "unresponsive"]
     operation: str
     cell_index: int | None = None
     kernel_id: str | None = None
     elapsed_seconds: float | None = None
     poll_after_seconds: int | None = None
     instruction: str | None = None
+    kernel_responsive: bool | None = None
+    error_code: str | None = None
+    error_message: str | None = None
     outputs: Any = None
 
 
@@ -1595,7 +1598,7 @@ async def execute_code(
 async def get_execution_status(notebook_id: str) -> dict[str, Any]:
     """Poll execution state without waiting for the notebook operation lock."""
     try:
-        path, state = runtime.execution_status(notebook_id)
+        path, state = await runtime.inspect_execution(notebook_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return _envelope(notebook_id, path, **state)
@@ -1617,16 +1620,21 @@ async def restart_notebook(
     request: RestartNotebookRequest | None = None,
 ) -> dict[str, Any]:
     """Replace the notebook's session kernel; SageMath is the default."""
+    recovering_unresponsive = False
     if runtime.execution_is_running(notebook_id):
         kernel_id = runtime.notebooks.get_kernel_id(notebook_id)
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Cannot restart notebook '{notebook_id}' because an execution is still "
-                f"running on kernel '{kernel_id}'. Poll "
-                f"/v1/notebooks/{notebook_id}/execution until it is complete."
-            ),
-        )
+        responsive, _detail = await runtime.probe_kernel(notebook_id)
+        if responsive:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Cannot restart notebook '{notebook_id}' because an execution is "
+                    f"still running on responsive kernel '{kernel_id}'. Poll "
+                    f"/v1/notebooks/{notebook_id}/execution until it is complete."
+                ),
+            )
+        recovering_unresponsive = True
+        runtime.abandon_execution(notebook_id)
     if notebook_id not in runtime.notebooks:
         raise HTTPException(
             status_code=400,
@@ -1638,10 +1646,18 @@ async def restart_notebook(
         async with runtime.lock_for(notebook_id):
             path = decode_notebook_id(notebook_id)
             kernel_id, session_id = await _replace_session_kernel(path, kernel_name)
-            runtime.notebooks.remove_notebook(notebook_id)
+            if recovering_unresponsive:
+                runtime.notebooks.forget_notebook(notebook_id)
+            else:
+                runtime.notebooks.remove_notebook(notebook_id)
             await runtime.activate(notebook_id, kernel_id=kernel_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    recovery_note = (
+        " after its previous heartbeat stopped responding"
+        if recovering_unresponsive
+        else ""
+    )
     return _envelope(
         notebook_id,
         path,
@@ -1649,7 +1665,8 @@ async def restart_notebook(
         kernel_name=kernel_name,
         session_id=session_id,
         result=(
-            f"Notebook '{notebook_id}' now has a fresh '{kernel_name}' kernel. "
+            f"Notebook '{notebook_id}' now has a fresh '{kernel_name}' kernel"
+            f"{recovery_note}. "
             "Memory state and imported packages have been cleared."
         ),
     )

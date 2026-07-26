@@ -228,6 +228,92 @@ class AssistantRuntime:
         pending = self.pending_executions.get(notebook_id)
         return pending is not None and not pending.task.done()
 
+    async def probe_kernel(self, notebook_id: str) -> tuple[bool, str]:
+        """Probe kernel-info on the control channel, bypassing shell execution."""
+        kernel = self.notebooks.get_kernel(notebook_id)
+        kernel_id = self.notebooks.get_kernel_id(notebook_id)
+        manager = getattr(kernel, "_manager", None)
+        client = getattr(manager, "client", None)
+        control = getattr(client, "control_channel", None)
+        session = getattr(client, "session", None)
+        if control is None or session is None:
+            raise ValueError(
+                f"Notebook '{notebook_id}' has no control channel "
+                f"(kernel_id={kernel_id!r})."
+            )
+
+        def _request_kernel_info() -> bool:
+            request = session.msg("kernel_info_request")
+            request_id = request["header"]["msg_id"]
+            control.send(request)
+            deadline = time.monotonic() + 4
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                reply = control.get_msg(timeout=remaining)
+                if reply.get("parent_header", {}).get("msg_id") == request_id:
+                    return reply.get("msg_type") == "kernel_info_reply"
+
+        try:
+            responsive = await asyncio.to_thread(_request_kernel_info)
+        except Exception:
+            responsive = False
+        if responsive:
+            return True, "Kernel control channel answered kernel_info_request."
+        return False, (
+            "Kernel heartbeat/control channel did not answer kernel_info_request "
+            "within 4 seconds."
+        )
+
+    async def inspect_execution(
+        self,
+        notebook_id: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Return task state enriched with kernel responsiveness evidence."""
+        path, state = self.execution_status(notebook_id)
+        if state["status"] != "running":
+            return path, state
+
+        responsive, detail = await self.probe_kernel(notebook_id)
+        state["kernel_responsive"] = responsive
+        if not responsive:
+            state.update(
+                status="unresponsive",
+                error_code="kernel_unresponsive",
+                error_message=detail,
+                instruction=(
+                    f"POST /v1/notebooks/{notebook_id}/restart to terminate the "
+                    "unresponsive session and attach a fresh kernel."
+                ),
+            )
+        return path, state
+
+    def abandon_execution(self, notebook_id: str) -> None:
+        """Detach a nonresponsive task and rotate only its notebook lock."""
+        pending = self.pending_executions.pop(notebook_id, None)
+        if pending is not None:
+            pending.task.cancel()
+
+            def _consume_result(task: asyncio.Task[tuple[str, Any]]) -> None:
+                try:
+                    task.exception()
+                except asyncio.CancelledError:
+                    logger.info(
+                        "Detached execution for notebook %s was cancelled.",
+                        notebook_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Detached execution for notebook %s ended with %s: %s",
+                        notebook_id,
+                        type(exc).__name__,
+                        exc,
+                    )
+
+            pending.task.add_done_callback(_consume_result)
+        self._notebook_locks[notebook_id] = asyncio.Lock()
+
     async def start_execution(
         self,
         notebook_id: str,
