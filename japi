@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+tool_dir=$(CDPATH= cd -- "$(dirname -- "$0")/tools/japi" && pwd)
+
+for command_name in go sha256sum sort xargs cut find tr sed mktemp install chmod mv rm; do
+    command -v "$command_name" >/dev/null ||
+        {
+            printf 'japi requires %s on PATH\n' "$command_name" >&2
+            exit 1
+        }
+done
+
+if [[ -n ${XDG_CACHE_HOME:-} ]]; then
+    cache_home=$XDG_CACHE_HOME
+elif [[ -n ${HOME:-} ]]; then
+    cache_home=$HOME/.cache
+else
+    printf 'japi requires XDG_CACHE_HOME or HOME\n' >&2
+    exit 1
+fi
+
+cd "$tool_dir"
+
+source_fingerprint=$(
+    {
+        sha256sum go.mod go.sum main.go
+        find vendor -type f -print0 | sort -z | xargs -0 sha256sum
+    } | sha256sum | cut -d ' ' -f 1
+)
+platform=$(go env GOOS GOARCH | tr '\n' '-' | sed 's/-$//')
+cache_directory=$cache_home/jupyter-assistant-api
+binary=$cache_directory/japi-$platform-$source_fingerprint
+
+if [[ ! -x $binary ]]; then
+    install -d -m 0700 "$cache_directory"
+    temporary_binary=$(mktemp "$cache_directory/.japi-build.XXXXXX")
+    trap 'rm -f "$temporary_binary"' EXIT
+    go build -mod=vendor -o "$temporary_binary" .
+    chmod 0700 "$temporary_binary"
+    mv "$temporary_binary" "$binary"
+    trap - EXIT
+fi
+
+exec "$binary" "$@"

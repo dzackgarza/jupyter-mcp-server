@@ -1,0 +1,10 @@
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+/context
+*.out
+coverage.html
+licenses.csv
+trivy-results.json
+/tmp
