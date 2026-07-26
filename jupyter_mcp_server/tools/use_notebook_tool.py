@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,9 +20,9 @@ from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, form
 
 logger = logging.getLogger(__name__)
 
-# Maximum seconds to wait for a kernel WebSocket handshake before returning a
-# structured error.  Must be well under Cloudflare's 100 s proxy timeout so
-# the application can emit a meaningful response instead of a bare 524.
+# Maximum seconds for HTTP kernel creation plus the kernel-info readiness probe.
+# This leaves the caller enough time to serialize a structured error before the
+# external request deadline.
 _KERNEL_START_TIMEOUT_SECONDS = 30
 
 
@@ -376,23 +377,44 @@ class UseNotebookTool(BaseTool):
                     kernel_id=kernel_id,
                     client_kwargs={"reconnect_interval": 1.0},
                 )
-                try:
-                    await asyncio.wait_for(
-                        asyncio.to_thread(kernel.start, path=notebook_path),
-                        timeout=_KERNEL_START_TIMEOUT_SECONDS,
+
+                def _start_and_probe() -> None:
+                    deadline = time.monotonic() + _KERNEL_START_TIMEOUT_SECONDS
+                    kernel.start(
+                        path=notebook_path,
+                        timeout=max(0.1, deadline - time.monotonic()),
                     )
-                except asyncio.TimeoutError as exc:
+                    kernel._manager.client.wait_for_ready(
+                        timeout=max(0.1, deadline - time.monotonic())
+                    )
+
+                try:
+                    await asyncio.to_thread(_start_and_probe)
+                except Exception as exc:
+                    try:
+                        await asyncio.to_thread(
+                            kernel.stop,
+                            shutdown_kernel=kernel_id is None,
+                            timeout=5,
+                        )
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "Failed to clean up kernel %s after startup failure: %s: %s",
+                            kernel_id,
+                            type(cleanup_exc).__name__,
+                            cleanup_exc,
+                        )
                     raise ToolError(
-                        f"[use_notebook] Kernel start timed out after "
+                        f"[use_notebook] Kernel did not become ready within "
                         f"{_KERNEL_START_TIMEOUT_SECONDS}s for '{notebook_path}'.\n"
                         f"  runtime_url: {runtime_url}\n"
-                        f"  kernel_id: {kernel_id or '(new — SageMath startup too slow)'}\n"
-                        f"  The kernel WebSocket handshake did not complete in time.\n"
+                        f"  kernel_id: {kernel_id or '(new kernel)'}\n"
+                        f"  readiness_probe: kernel_info_request\n"
+                        f"  observed_error: {type(exc).__name__}: {exc}\n"
                         f"  Suggestions:\n"
-                        f"    - Call list_kernels and pass an already-running kernel's "
-                        f"id as kernel_id to skip startup entirely.\n"
-                        f"    - Retry; the server may be transiently overloaded.\n"
-                        f"    - Check Jupyter server health if retries keep failing.",
+                        f"    - Call list_kernels to inspect the kernel's current state.\n"
+                        f"    - Check Jupyter server logs for this kernel ID.\n"
+                        f"    - Retry only after correcting the reported failure.",
                         status_code=504,
                     ) from exc
 
