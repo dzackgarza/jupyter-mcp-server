@@ -153,6 +153,7 @@ def _cleanup_test_notebooks(jupyter_server: str, assistant_api_url: str):
         "test-handoff.ipynb",
         "test-hung-a.ipynb",
         "test-hung-b.ipynb",
+        "test-hung-recovery.ipynb",
     )
     for name in names:
         try:
@@ -809,6 +810,57 @@ async def test_handed_off_execution_does_not_block_another_notebook(
         "An execution on one notebook monopolized the process-wide runtime lock "
         f"for {elapsed:.1f}s and blocked an unrelated notebook."
     )
+
+
+async def test_stopped_kernel_is_diagnosed_and_recoverable(
+    client: AsyncClient,
+) -> None:
+    created = await client.post(
+        "/v1/notebooks/use",
+        json={
+            "notebook_path": "test-hung-recovery.ipynb",
+            "mode": "create",
+            "kernel_name": "python3",
+        },
+    )
+    assert created.json()["ok"] is True, created.text
+    notebook_id = created.json()["notebook_id"]
+    old_kernel_id = created.json()["kernel_id"]
+
+    running = await client.post(
+        f"/v1/notebooks/{notebook_id}/execute-code",
+        json={
+            "code": (
+                "import os, signal; "
+                "os.kill(os.getpid(), signal.SIGSTOP)"
+            ),
+            "handoff_after_seconds": 1,
+        },
+    )
+    assert running.json()["status"] == "running", running.text
+
+    status = await client.get(f"/v1/notebooks/{notebook_id}/execution")
+    status_body = status.json()
+    assert status_body["status"] == "unresponsive", status.text
+    assert status_body["kernel_id"] == old_kernel_id
+    assert status_body["kernel_responsive"] is False
+    assert "heartbeat" in status_body["error_message"].lower()
+    assert f"/v1/notebooks/{notebook_id}/restart" in status_body["instruction"]
+
+    restarted = await client.post(
+        f"/v1/notebooks/{notebook_id}/restart",
+        json={"kernel_name": "python3"},
+    )
+    restarted_body = restarted.json()
+    assert restarted_body["ok"] is True, restarted.text
+    assert restarted_body["kernel_id"] != old_kernel_id
+
+    recovered = await client.post(
+        f"/v1/notebooks/{notebook_id}/execute-code",
+        json={"code": "print('recovered')", "handoff_after_seconds": 10},
+    )
+    assert recovered.json()["status"] == "complete", recovered.text
+    assert "recovered" in str(recovered.json()["outputs"])
 
 
 async def test_use_notebook_rejects_kernelspec_mismatch(
