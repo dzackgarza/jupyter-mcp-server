@@ -740,3 +740,37 @@ async def test_use_notebook_rejects_kernelspec_mismatch(
     assert body["ok"] is False
     assert body["http_status"] == HTTPStatus.CONFLICT
     assert "already has a 'python3' session kernel" in body["error_message"]
+
+
+async def test_restart_defaults_existing_python_session_to_sagemath(
+    client: AsyncClient,
+    jupyter_server: str,
+) -> None:
+    path = "test-restart-defaults-to-sage.ipynb"
+    created = await client.post(
+        "/v1/notebooks/use",
+        json={"notebook_path": path, "mode": "create", "kernel_name": "python3"},
+    )
+    assert created.json()["ok"] is True, created.text
+    notebook_id = created.json()["notebook_id"]
+    old_kernel_id = created.json()["kernel_id"]
+
+    restarted = await client.post(f"/v1/notebooks/{notebook_id}/restart", json={})
+    body = restarted.json()
+    assert restarted.status_code == HTTPStatus.OK
+    assert body["ok"] is True, restarted.text
+    assert body["kernel_name"] == "sagemath"
+    assert body["kernel_id"] != old_kernel_id
+
+    sessions = await _jupyter_json(jupyter_server, "/api/sessions")
+    matching = [session for session in sessions if session["path"] == path]
+    assert len(matching) == 1
+    assert matching[0]["kernel"]["name"] == "sagemath"
+    assert matching[0]["kernel"]["id"] == body["kernel_id"]
+
+    executed = await client.post(
+        f"/v1/notebooks/{notebook_id}/execute-code",
+        json={"code": "2 + 2", "handoff_after_seconds": 35},
+    )
+    assert executed.json()["ok"] is True, executed.text
+    assert "4" in str(executed.json()["outputs"])
