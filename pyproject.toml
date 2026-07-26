@@ -64,6 +64,7 @@ typing = ["mypy>=0.990"]
 jupyter-mcp = "jupyter_mcp_server.cli.cli:serve"
 jupyter-mcp-server = "jupyter_mcp_server.cli.cli:serve"
 jupyter-assistant-api = "jupyter_mcp_server.assistant_api:main"
+jupyter-kernel-watch = "jupyter_mcp_server.kernel_watcher:main"
 
 [project.license]
 file = "LICENSE"

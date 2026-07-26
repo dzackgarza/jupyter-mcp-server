@@ -1,0 +1,10 @@
+[Unit]
+Description=Check Jupyter kernels for prolonged unresponsiveness
+After=jupyter-sagemath.service graphical-session.target
+Wants=jupyter-sagemath.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/dzack/gitclones/jupyter-assistant-api
+ExecStart=/bin/direnv exec /home/dzack/gitclones/jupyter-assistant-api /home/dzack/.local/bin/uv run jupyter-kernel-watch --threshold-seconds 1200 --repeat-seconds 3600
+Environment=HOME=/home/dzack

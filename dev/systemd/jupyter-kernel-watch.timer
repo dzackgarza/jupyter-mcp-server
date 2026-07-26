@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically inspect Jupyter kernels
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=jupyter-kernel-watch.service
+
+[Install]
+WantedBy=timers.target
