@@ -26,6 +26,7 @@ EXPECTED_OPERATION_IDS = {
     "list_notebooks",
     "use_notebook",
     "read_notebook",
+    "get_notebook_status",
     "read_cell",
     "insert_cell",
     "overwrite_cell_source",
