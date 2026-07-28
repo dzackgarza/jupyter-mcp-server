@@ -13,11 +13,20 @@ Covers spec required unit tests 5 and 6:
 
 from __future__ import annotations
 
+import os
+from urllib.parse import urlsplit
+
 import pytest
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
+from openapi_spec_validator import validate
 
 from jupyter_mcp_server.assistant_api import app, runtime
+
+PUBLIC_OPENAPI_URL = os.environ.get(
+    "ASSISTANT_API_PUBLIC_OPENAPI_URL",
+    "https://jupyter-assistant-rack.dzackgarza.com/openapi.json",
+)
 
 EXPECTED_OPERATION_IDS = {
     "health",
@@ -102,6 +111,41 @@ def test_openapi_document_generates() -> None:
     assert schema["openapi"].startswith("3.")
     assert schema["info"]["title"] == "Jupyter Assistant API"
     assert schema.get("servers", []) == []
+
+
+@pytest.mark.asyncio
+async def test_public_openapi_schema_is_valid_and_current() -> None:
+    """The public Cloudflare OpenAPI document must be valid and expose this API."""
+    async with AsyncClient(timeout=20, headers={"User-Agent": "pytest"}) as client:
+        response = await client.get(PUBLIC_OPENAPI_URL)
+
+    assert response.status_code == 200, response.text[:500]
+    assert response.headers["content-type"].startswith("application/json")
+
+    schema = response.json()
+    validate(schema, base_uri=PUBLIC_OPENAPI_URL)
+
+    public_origin = f"{urlsplit(PUBLIC_OPENAPI_URL).scheme}://{urlsplit(PUBLIC_OPENAPI_URL).netloc}"
+    server_urls = {server.get("url") for server in schema.get("servers", [])}
+    assert public_origin in server_urls
+
+    operations = {
+        operation.get("operationId")
+        for path_item in schema.get("paths", {}).values()
+        for operation in path_item.values()
+        if isinstance(operation, dict)
+    }
+    assert EXPECTED_OPERATION_IDS <= operations
+
+    paths = schema["paths"]
+    assert paths["/v1/files"]["get"]["operationId"] == "list_files"
+    assert paths["/v1/files/content"]["get"]["operationId"] == "read_file"
+    write_operation = paths["/v1/files/library"]["post"]
+    assert write_operation["operationId"] == "write_library_file"
+    assert write_operation["x-openai-isConsequential"] is False
+    assert write_operation["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/WriteLibraryFileRequest"
+    }
 
 
 def test_restart_notebook_request_body_schema_is_tool_importable_object() -> None:
