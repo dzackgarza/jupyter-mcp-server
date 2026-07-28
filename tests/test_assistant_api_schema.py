@@ -100,6 +100,13 @@ def test_openapi_document_generates() -> None:
     assert schema["info"]["title"] == "Jupyter Assistant API"
 
 
+def test_restart_notebook_request_body_schema_is_tool_importable_object() -> None:
+    """Tool importers require request body schemas to be concrete objects."""
+    operation = app.openapi()["paths"]["/v1/notebooks/{notebook_id}/restart"]["post"]
+    schema = operation["requestBody"]["content"]["application/json"]["schema"]
+    assert schema == {"$ref": "#/components/schemas/RestartNotebookRequest"}
+
+
 def test_read_notebook_schema_directs_bounded_overview_then_detail() -> None:
     """The Action schema must make the existing bounded workflow discoverable."""
     operation = app.openapi()["paths"]["/v1/notebooks/{notebook_id}"]["get"]

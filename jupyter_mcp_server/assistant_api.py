@@ -27,7 +27,7 @@ from typing import Any, Literal
 
 import nbformat
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -1675,7 +1675,7 @@ async def get_execution_status(notebook_id: str) -> dict[str, Any]:
 )
 async def restart_notebook(
     notebook_id: str,
-    request: RestartNotebookRequest | None = None,
+    request: RestartNotebookRequest = Body(default_factory=RestartNotebookRequest),
 ) -> dict[str, Any]:
     """Replace the notebook's session kernel; SageMath is the default."""
     recovering_unresponsive = False
@@ -1699,7 +1699,7 @@ async def restart_notebook(
             detail=f"Notebook '{notebook_id}' is not connected.",
         )
 
-    kernel_name = request.kernel_name if request is not None else "sagemath"
+    kernel_name = request.kernel_name
     try:
         async with runtime.operation_lock(notebook_id):
             path = decode_notebook_id(notebook_id)
