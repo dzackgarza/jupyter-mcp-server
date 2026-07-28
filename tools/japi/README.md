@@ -12,6 +12,13 @@ From the repository root:
 ./japi read-notebook <notebook-id> --help
 ```
 
+Target another deployed host with either launcher form:
+
+```bash
+./japi --hostname jupyter-assistant-rack.dzackgarza.com health
+JAPI_BASE_URL=https://jupyter-assistant-rack.dzackgarza.com ./japi health
+```
+
 ## Run the latest GitHub push
 
 Run the launcher directly from the current `main` branch:

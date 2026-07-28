@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,8 +14,7 @@ import (
 )
 
 const (
-	apiBaseURL = "https://jupyter-assistant.dzackgarza.com"
-	apiSpecURL = apiBaseURL + "/openapi.json"
+	defaultAPIBaseURL = "https://jupyter-assistant.dzackgarza.com"
 )
 
 type envelopeFormatter struct{}
@@ -79,7 +79,72 @@ func validateArgs(args []string) error {
 	return nil
 }
 
+func normalizeBaseURL(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", errors.New("API base URL cannot be empty")
+	}
+	if !strings.Contains(value, "://") {
+		value = "https://" + value
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("parse API base URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("API base URL must use http or https, got %q", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return "", errors.New("API base URL must include a hostname")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	return parsed.String(), nil
+}
+
+func parseLauncherArgs(args []string) (string, []string, error) {
+	rawBaseURL := os.Getenv("JAPI_BASE_URL")
+	if rawBaseURL == "" {
+		rawBaseURL = defaultAPIBaseURL
+	}
+
+	forwarded := make([]string, 0, len(args))
+	if len(args) > 0 {
+		forwarded = append(forwarded, args[0])
+	}
+
+	for index := 1; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--":
+			forwarded = append(forwarded, args[index:]...)
+			index = len(args)
+		case arg == "--base-url" || arg == "--hostname":
+			if index+1 >= len(args) {
+				return "", nil, fmt.Errorf("%s requires a value", arg)
+			}
+			rawBaseURL = args[index+1]
+			index++
+		case strings.HasPrefix(arg, "--base-url="):
+			rawBaseURL = strings.TrimPrefix(arg, "--base-url=")
+		case strings.HasPrefix(arg, "--hostname="):
+			rawBaseURL = strings.TrimPrefix(arg, "--hostname=")
+		default:
+			forwarded = append(forwarded, arg)
+		}
+	}
+
+	baseURL, err := normalizeBaseURL(rawBaseURL)
+	if err != nil {
+		return "", nil, err
+	}
+	return baseURL, forwarded, nil
+}
+
 func run(args []string) error {
+	apiBaseURL, args, err := parseLauncherArgs(args)
+	if err != nil {
+		return err
+	}
 	if err := validateArgs(args); err != nil {
 		return err
 	}
@@ -113,7 +178,7 @@ func run(args []string) error {
 	cli.SetDefaultConfig(&restish.Config{APIs: map[string]*restish.APIConfig{
 		"api": {
 			BaseURL: apiBaseURL,
-			SpecURL: apiSpecURL,
+			SpecURL: apiBaseURL + "/openapi.json",
 		},
 	}})
 	cli.SetCommandSurface(restish.CommandSurface{
