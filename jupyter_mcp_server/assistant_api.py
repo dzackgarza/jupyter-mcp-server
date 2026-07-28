@@ -76,9 +76,11 @@ app = FastAPI(
         "implementations.  A notebook is identified by a deterministic "
         "nb_<base64> ID derived from its Jupyter-root-relative filepath."
     ),
-    servers=[
-        {"url": os.getenv("ASSISTANT_API_SERVER_URL", "https://jupyter-assistant.dzackgarza.com")},
-    ],
+    servers=(
+        [{"url": server_url}]
+        if (server_url := os.getenv("ASSISTANT_API_SERVER_URL"))
+        else []
+    ),
 )
 
 runtime = AssistantRuntime()

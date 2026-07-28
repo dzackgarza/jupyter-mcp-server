@@ -98,6 +98,7 @@ def test_openapi_document_generates() -> None:
     schema = app.openapi()
     assert schema["openapi"].startswith("3.")
     assert schema["info"]["title"] == "Jupyter Assistant API"
+    assert schema.get("servers", []) == []
 
 
 def test_restart_notebook_request_body_schema_is_tool_importable_object() -> None:
