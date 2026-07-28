@@ -22,6 +22,7 @@ from jupyter_mcp_server.assistant_api import app, runtime
 EXPECTED_OPERATION_IDS = {
     "health",
     "list_files",
+    "read_file",
     "list_kernels",
     "list_notebooks",
     "use_notebook",

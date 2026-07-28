@@ -24,6 +24,7 @@ import re
 import time
 import uuid
 from typing import Any, Literal
+from urllib.parse import quote
 
 import nbformat
 import uvicorn
@@ -505,6 +506,19 @@ class GenericResultResponse(BaseModel):
     result: Any = None
 
 
+class FileContentResponse(BaseModel):
+    ok: bool
+    path: str
+    name: str
+    type: Literal["file"]
+    format: Literal["text", "base64"]
+    mimetype: str | None = None
+    size: int | None = None
+    last_modified: str | None = None
+    writable: bool | None = None
+    content: str
+
+
 class RestartResponse(BaseModel):
     ok: bool
     notebook_id: str
@@ -560,6 +574,55 @@ def _jupyter_connection() -> tuple[str, dict[str, str]]:
     token = config.runtime_token
     headers = {} if not token else {"Authorization": f"token {token}"}
     return base_url.rstrip("/"), headers
+
+
+async def _read_jupyter_file(path: str, file_format: Literal["text", "base64"]) -> dict[str, Any]:
+    """Read one Jupyter-root-relative file through the Contents API."""
+    import httpx
+
+    clean_path = path.strip("/")
+    if not clean_path:
+        raise HTTPException(status_code=400, detail="File path must not be empty.")
+
+    base_url, headers = _jupyter_connection()
+    contents_url = f"{base_url}/api/contents/{quote(clean_path, safe='/')}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            contents_url,
+            params={"content": "1", "type": "file", "format": file_format},
+            headers=headers,
+        )
+
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("message", response.text)
+        except ValueError:
+            detail = response.text
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"Could not read file '{clean_path}': {detail[:500]}",
+        )
+
+    model = response.json()
+    if model.get("type") != "file":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Path '{clean_path}' is a {model.get('type')!r}, not a file.",
+        )
+    if model.get("content") is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Jupyter returned no content for file '{clean_path}'.",
+        )
+    if model.get("format") not in ("text", "base64"):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Jupyter returned unsupported format {model.get('format')!r} "
+                f"for file '{clean_path}'."
+            ),
+        )
+    return model
 
 
 async def _ensure_notebook_file(notebook_path: str, *, create: bool) -> None:
@@ -1035,6 +1098,34 @@ async def list_files(
             "list_notebooks returned no result after the Jupyter filesystem scan."
         )
     return {"ok": True, "result": result}
+
+
+@app.get("/v1/files/content", operation_id="read_file", response_model=FileContentResponse)
+async def read_file(
+    path: str = Query(
+        ...,
+        description="Jupyter-root-relative file path to read. Use list_files to discover paths.",
+    ),
+    file_format: Literal["text", "base64"] = Query(
+        "text",
+        alias="format",
+        description="Return text files as UTF-8 text, or binary files as base64.",
+    ),
+) -> dict[str, Any]:
+    """Read one non-notebook file from the configured Jupyter server."""
+    model = await _read_jupyter_file(path, file_format)
+    return {
+        "ok": True,
+        "path": model["path"],
+        "name": model["name"],
+        "type": "file",
+        "format": model["format"],
+        "mimetype": model.get("mimetype"),
+        "size": model.get("size"),
+        "last_modified": str(model.get("last_modified")) if model.get("last_modified") else None,
+        "writable": model.get("writable"),
+        "content": model["content"],
+    }
 
 
 @app.get("/v1/kernels", operation_id="list_kernels", response_model=GenericResultResponse)

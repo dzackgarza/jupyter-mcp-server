@@ -45,7 +45,8 @@ All routes are served under `https://jupyter-assistant.dzackgarza.com`. The full
 | Method | Path | Operation ID | Description |
 |---|---|---|---|
 | GET | `/health` | `health` | Report API and Jupyter server readiness |
-| GET | `/v1/files` | `list_files` | List files on the Jupyter server |
+| GET | `/v1/files` | `list_files` | List arbitrary files and directories on the Jupyter server |
+| GET | `/v1/files/content` | `read_file` | Read a non-notebook file by Jupyter-root-relative path |
 | GET | `/v1/kernels` | `list_kernels` | List active kernels |
 | GET | `/v1/notebooks` | `list_notebooks` | List all `.ipynb` files |
 
@@ -108,7 +109,7 @@ This adapter is designed for ChatGPT Custom GPTs via the Actions feature.
    ```
    https://jupyter-assistant.dzackgarza.com/openapi.json
    ```
-4. The schema loads with all 17 endpoints, request/response models, and operation IDs
+4. The schema loads with all endpoints, request/response models, and operation IDs
 
 ### 2. Authentication
 

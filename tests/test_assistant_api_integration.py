@@ -270,6 +270,43 @@ async def test_list_notebooks_includes_created_notebook(
     assert "test-create.ipynb" in body["result"]
 
 
+async def test_list_files_and_read_file_expose_non_notebook_files(
+    client: AsyncClient,
+    jupyter_server: str,
+) -> None:
+    path = f"assistant-file-read-{uuid.uuid4().hex}.txt"
+    content = "alpha\nbeta\n"
+    async with AsyncClient(base_url=jupyter_server, timeout=30) as jupyter:
+        created = await jupyter.put(
+            f"/api/contents/{path}",
+            params={"token": "MY_TOKEN"},
+            json={"type": "file", "format": "text", "content": content},
+        )
+        created.raise_for_status()
+        try:
+            listed = await client.get("/v1/files", params={"pattern": "*.txt", "limit": 0})
+            listed_body = listed.json()
+            assert listed.status_code == HTTPStatus.OK, listed.text
+            assert listed_body["ok"] is True, listed.text
+            assert path in listed_body["result"]
+
+            read = await client.get("/v1/files/content", params={"path": path})
+            read_body = read.json()
+            assert read.status_code == HTTPStatus.OK, read.text
+            assert read_body["ok"] is True, read.text
+            assert read_body["path"] == path
+            assert read_body["type"] == "file"
+            assert read_body["format"] == "text"
+            assert read_body["content"] == content
+            assert read_body["size"] == len(content.encode("utf-8"))
+        finally:
+            deleted = await jupyter.delete(
+                f"/api/contents/{path}",
+                params={"token": "MY_TOKEN"},
+            )
+            assert deleted.status_code == HTTPStatus.NO_CONTENT
+
+
 async def test_notebook_status_reports_persisted_state_without_a_session(
     client: AsyncClient,
     jupyter_server: str,
