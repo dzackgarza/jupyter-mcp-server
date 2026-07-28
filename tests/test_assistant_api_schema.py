@@ -23,6 +23,7 @@ EXPECTED_OPERATION_IDS = {
     "health",
     "list_files",
     "read_file",
+    "write_library_file",
     "list_kernels",
     "list_notebooks",
     "use_notebook",
@@ -45,6 +46,7 @@ EXPECTED_OPERATION_IDS = {
 
 MUTATION_OPERATION_IDS = {
     "use_notebook",
+    "write_library_file",
     "insert_cell",
     "overwrite_cell_source",
     "edit_cell_source",

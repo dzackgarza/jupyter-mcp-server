@@ -29,7 +29,7 @@ Custom GPT → HTTPS → cloudflared tunnel → FastAPI adapter → existing too
 | Decision | Rationale |
 |---|---|
 | Deterministic `nb_<base64>` IDs | No persisted mapping; survives restart; reversible to filepath |
-| `x-openai-isConsequential: false` on all 11 mutation routes | Enables "always allow" mode in ChatGPT Actions |
+| `x-openai-isConsequential: false` on mutation routes | Enables "always allow" mode in ChatGPT Actions |
 | Pre-start kernel via REST API | `UseNotebookTool` connects to a pre-started kernel with the requested kernelspec instead of defaulting to `python3` |
 | `workers=1` | `NotebookManager` is process-wide state; >1 worker races on the current-notebook pointer |
 | Global exception handler | Catches unhandled exceptions with structured JSON + traceback so the GPT can diagnose failures |
@@ -49,6 +49,7 @@ All routes are served under `https://jupyter-assistant.dzackgarza.com`. The full
 | GET | `/v1/files/content` | `read_file` | Read a non-notebook file by Jupyter-root-relative path |
 | GET | `/v1/kernels` | `list_kernels` | List active kernels |
 | GET | `/v1/notebooks` | `list_notebooks` | List all `.ipynb` files |
+| POST | `/v1/files/library` | `write_library_file` | Write a `.py` or `.sage` helper library for notebook import/load |
 
 ### Notebook lifecycle
 
@@ -119,7 +120,7 @@ If you add auth later, set the GPT to send an API key header and add a middlewar
 
 ### 3. "Always allow" mutations
 
-All 11 mutation endpoints carry `x-openai-isConsequential: false` in the OpenAPI spec. This tells ChatGPT the operations are non-destructive, enabling the **"Always allow"** toggle so the GPT doesn't prompt for confirmation on every write.
+Mutation endpoints carry `x-openai-isConsequential: false` in the OpenAPI spec. This tells ChatGPT the operations are non-destructive, enabling the **"Always allow"** toggle so the GPT doesn't prompt for confirmation on every write.
 
 Without this, ChatGPT asks "Allow this action?" on every cell insert, execute, delete, etc. — unusable for a multi-step workflow.
 

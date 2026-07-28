@@ -18,6 +18,7 @@ mutation endpoints so the GPT can use "always allow" behavior.
 from __future__ import annotations
 
 import asyncio
+import keyword
 import logging
 import os
 import re
@@ -365,6 +366,21 @@ class ListFilesQuery(BaseModel):
     pattern: str | None = Field(None, description="Glob pattern, e.g. *.ipynb")
 
 
+class WriteLibraryFileRequest(BaseModel):
+    path: str = Field(
+        ...,
+        description=(
+            "Jupyter-root-relative .py or .sage file path. Intended for helper "
+            "libraries imported or loaded by notebooks."
+        ),
+    )
+    content: str = Field(..., description="Complete file contents to write.")
+    overwrite: bool = Field(
+        True,
+        description="If false, fail when the target file already exists.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Response models — explicit so the OpenAPI schema has `properties`
 # (GPT Action validator rejects object schemas without properties).
@@ -519,6 +535,19 @@ class FileContentResponse(BaseModel):
     content: str
 
 
+class LibraryFileWriteResponse(BaseModel):
+    ok: bool
+    path: str
+    name: str
+    type: Literal["file"]
+    format: Literal["text"]
+    purpose: Literal["notebook_library"]
+    import_hint: str
+    size: int | None = None
+    last_modified: str | None = None
+    writable: bool | None = None
+
+
 class RestartResponse(BaseModel):
     ok: bool
     notebook_id: str
@@ -576,14 +605,48 @@ def _jupyter_connection() -> tuple[str, dict[str, str]]:
     return base_url.rstrip("/"), headers
 
 
+def _clean_jupyter_file_path(path: str) -> str:
+    """Normalize a Jupyter-root-relative file path without allowing traversal."""
+    clean_path = path.strip().strip("/")
+    if not clean_path:
+        raise HTTPException(status_code=400, detail="File path must not be empty.")
+    parts = clean_path.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise HTTPException(
+            status_code=400,
+            detail=f"File path '{path}' must be a plain Jupyter-root-relative path.",
+        )
+    return clean_path
+
+
+def _validate_library_file_path(path: str) -> None:
+    """Validate a library helper path against its intended notebook usage."""
+    if path.endswith(".py"):
+        module_path = path[:-3]
+        module_parts = module_path.split("/")
+        if any(not part.isidentifier() or keyword.iskeyword(part) for part in module_parts):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Python library file '{path}' must map to an importable module path. "
+                    "Use identifier path segments such as helpers.py or lib/helpers.py."
+                ),
+            )
+    elif not path.endswith(".sage"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Library file '{path}' must end in .py or .sage. "
+                "Use read_file/list_files for other file types."
+            ),
+        )
+
+
 async def _read_jupyter_file(path: str, file_format: Literal["text", "base64"]) -> dict[str, Any]:
     """Read one Jupyter-root-relative file through the Contents API."""
     import httpx
 
-    clean_path = path.strip("/")
-    if not clean_path:
-        raise HTTPException(status_code=400, detail="File path must not be empty.")
-
+    clean_path = _clean_jupyter_file_path(path)
     base_url, headers = _jupyter_connection()
     contents_url = f"{base_url}/api/contents/{quote(clean_path, safe='/')}"
     async with httpx.AsyncClient(timeout=30) as client:
@@ -623,6 +686,60 @@ async def _read_jupyter_file(path: str, file_format: Literal["text", "base64"]) 
             ),
         )
     return model
+
+
+async def _write_jupyter_library_file(request: WriteLibraryFileRequest) -> dict[str, Any]:
+    """Write a notebook helper library file through the Jupyter Contents API."""
+    import httpx
+
+    clean_path = _clean_jupyter_file_path(request.path)
+    _validate_library_file_path(clean_path)
+
+    base_url, headers = _jupyter_connection()
+    contents_url = f"{base_url}/api/contents/{quote(clean_path, safe='/')}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        if not request.overwrite:
+            existing = await client.get(
+                contents_url,
+                params={"content": "0", "type": "file"},
+                headers=headers,
+            )
+            if existing.status_code == 200:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Library file '{clean_path}' already exists.",
+                )
+            if existing.status_code != 404:
+                raise HTTPException(
+                    status_code=existing.status_code,
+                    detail=f"Could not inspect library file '{clean_path}': {existing.text[:500]}",
+                )
+
+        response = await client.put(
+            contents_url,
+            headers=headers,
+            json={"type": "file", "format": "text", "content": request.content},
+        )
+
+    if response.status_code not in (200, 201):
+        try:
+            detail = response.json().get("message", response.text)
+        except ValueError:
+            detail = response.text
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"Could not write library file '{clean_path}': {detail[:500]}",
+        )
+
+    return response.json()
+
+
+def _library_import_hint(path: str) -> str:
+    """Return concise notebook usage guidance for a written library file."""
+    if path.endswith(".sage"):
+        return f"Use load('{path}') or attach('{path}') from a Sage notebook."
+    module = path[:-3].replace("/", ".")
+    return f"Use import {module} from a notebook whose kernel can import this path."
 
 
 async def _ensure_notebook_file(notebook_path: str, *, create: bool) -> None:
@@ -1125,6 +1242,29 @@ async def read_file(
         "last_modified": str(model.get("last_modified")) if model.get("last_modified") else None,
         "writable": model.get("writable"),
         "content": model["content"],
+    }
+
+
+@app.post(
+    "/v1/files/library",
+    operation_id="write_library_file",
+    response_model=LibraryFileWriteResponse,
+    openapi_extra=_CONSEQUENTIAL_FALSE,
+)
+async def write_library_file(request: WriteLibraryFileRequest) -> dict[str, Any]:
+    """Write a Python or Sage helper file for notebook imports/loads."""
+    model = await _write_jupyter_library_file(request)
+    return {
+        "ok": True,
+        "path": model["path"],
+        "name": model["name"],
+        "type": "file",
+        "format": "text",
+        "purpose": "notebook_library",
+        "import_hint": _library_import_hint(model["path"]),
+        "size": model.get("size"),
+        "last_modified": str(model.get("last_modified")) if model.get("last_modified") else None,
+        "writable": model.get("writable"),
     }
 
 

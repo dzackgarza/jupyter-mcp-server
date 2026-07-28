@@ -307,6 +307,65 @@ async def test_list_files_and_read_file_expose_non_notebook_files(
             assert deleted.status_code == HTTPStatus.NO_CONTENT
 
 
+async def test_write_library_file_creates_python_and_sage_helpers(
+    client: AsyncClient,
+    jupyter_server: str,
+) -> None:
+    py_path = f"assistant_library_{uuid.uuid4().hex}.py"
+    sage_path = f"assistant-library-{uuid.uuid4().hex}.sage"
+    written_paths: list[str] = []
+    async with AsyncClient(base_url=jupyter_server, timeout=30) as jupyter:
+        try:
+            py_response = await client.post(
+                "/v1/files/library",
+                json={
+                    "path": py_path,
+                    "content": "def double(x):\n    return 2 * x\n",
+                    "overwrite": False,
+                },
+            )
+            py_body = py_response.json()
+            assert py_response.status_code == HTTPStatus.OK, py_response.text
+            assert py_body["ok"] is True, py_response.text
+            assert py_body["path"] == py_path
+            assert py_body["purpose"] == "notebook_library"
+            assert f"import {py_path[:-3]}" in py_body["import_hint"]
+            written_paths.append(py_path)
+
+            sage_response = await client.post(
+                "/v1/files/library",
+                json={
+                    "path": sage_path,
+                    "content": "def triple(x):\n    return 3 * x\n",
+                    "overwrite": False,
+                },
+            )
+            sage_body = sage_response.json()
+            assert sage_response.status_code == HTTPStatus.OK, sage_response.text
+            assert sage_body["ok"] is True, sage_response.text
+            assert sage_body["path"] == sage_path
+            assert f"load('{sage_path}')" in sage_body["import_hint"]
+            written_paths.append(sage_path)
+
+            for path, expected in (
+                (py_path, "def double(x):\n    return 2 * x\n"),
+                (sage_path, "def triple(x):\n    return 3 * x\n"),
+            ):
+                persisted = await jupyter.get(
+                    f"/api/contents/{path}",
+                    params={"token": "MY_TOKEN", "content": "1", "type": "file"},
+                )
+                persisted.raise_for_status()
+                assert persisted.json()["content"] == expected
+        finally:
+            for path in written_paths:
+                deleted = await jupyter.delete(
+                    f"/api/contents/{path}",
+                    params={"token": "MY_TOKEN"},
+                )
+                assert deleted.status_code == HTTPStatus.NO_CONTENT
+
+
 async def test_notebook_status_reports_persisted_state_without_a_session(
     client: AsyncClient,
     jupyter_server: str,
