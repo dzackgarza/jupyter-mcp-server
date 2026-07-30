@@ -11,13 +11,19 @@ replacing the scattered global variable approach with a unified architecture.
 
 import asyncio
 import logging
-from collections.abc import Callable
-from contextvars import ContextVar
+from collections.abc import Callable, Iterator
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from jupyter_kernel_client import KernelClient
-from jupyter_nbmodel_client import NbModelClient, get_notebook_websocket_url
+if TYPE_CHECKING:
+    KernelClient = Any
+    NbModelClient = Any
+
+    def get_notebook_websocket_url(**kwargs: Any) -> str: ...
+
+else:
+    from jupyter_kernel_client import KernelClient
+    from jupyter_nbmodel_client import NbModelClient, get_notebook_websocket_url
 
 from .config import get_config
 
@@ -64,9 +70,7 @@ class NotebookConnection:
         await self._notebook.__aenter__()
         return self._notebook
 
-    async def __aexit__(
-        self, exc_type: type | None, exc_val: BaseException | None, exc_tb: TracebackType | None
-    ) -> None:
+    async def __aexit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: TracebackType | None) -> None:
         """Exit context, clean up connection.
 
         Bounded by DISCONNECT_TIMEOUT so a stuck disconnect cannot hang the tool call
@@ -79,10 +83,9 @@ class NotebookConnection:
                     self._notebook.__aexit__(exc_type, exc_val, exc_tb),
                     timeout=DISCONNECT_TIMEOUT,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
-                    "Notebook client disconnect did not finish within %ss; "
-                    "continuing without waiting for its cleanup.",
+                    "Notebook client disconnect did not finish within %ss; continuing without waiting for its cleanup.",
                     DISCONNECT_TIMEOUT,
                 )
 
@@ -95,19 +98,16 @@ class NotebookManager:
     management system that supports both single and multiple notebook scenarios.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._notebooks: dict[str, dict[str, Any]] = {}
         self._default_notebook_name = "default"
-        self._current_notebook: ContextVar[str | None] = ContextVar(
-            f"current_notebook_{id(self)}",
-            default=None,
-        )
+        self._current_notebook: str | None = None
 
     def __contains__(self, name: str) -> bool:
         """Check if a notebook is managed by this instance."""
         return name in self._notebooks
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[tuple[str, dict[str, Any]]]:
         """Iterate over notebook name, info pairs."""
         return iter(self._notebooks.items())
 
@@ -146,8 +146,8 @@ class NotebookManager:
 
         # For backward compatibility: if this is the first notebook or it's "default",
         # set it as the current notebook
-        if self._current_notebook.get() is None or name == self._default_notebook_name:
-            self._current_notebook.set(name)
+        if self._current_notebook is None or name == self._default_notebook_name:
+            self._current_notebook = name
 
     def remove_notebook(self, name: str) -> bool:
         """
@@ -188,16 +188,16 @@ class NotebookManager:
                 del self._notebooks[name]
 
                 # If we removed the current notebook, update the current pointer
-                if self._current_notebook.get() == name:
+                if self._current_notebook == name:
                     # Set to another notebook if available, prefer "default" for compatibility
                     if self._default_notebook_name in self._notebooks:
-                        self._current_notebook.set(self._default_notebook_name)
+                        self._current_notebook = self._default_notebook_name
                     elif self._notebooks:
                         # Set to the first available notebook
-                        self._current_notebook.set(next(iter(self._notebooks.keys())))
+                        self._current_notebook = next(iter(self._notebooks.keys()))
                     else:
                         # No notebooks left
-                        self._current_notebook.set(None)
+                        self._current_notebook = None
             return True
         return False
 
@@ -206,9 +206,9 @@ class NotebookManager:
         if name not in self._notebooks:
             return False
         del self._notebooks[name]
-        if self._current_notebook.get() == name:
+        if self._current_notebook == name:
             replacement = next(iter(self._notebooks), None)
-            self._current_notebook.set(replacement)
+            self._current_notebook = replacement
         return True
 
     def get_kernel(self, name: str) -> KernelClient | dict[str, Any] | None:
@@ -239,9 +239,9 @@ class NotebookManager:
             kernel = self._notebooks[name]["kernel"]
             # Handle both KernelClient objects and kernel metadata dicts
             if isinstance(kernel, dict):
-                return kernel.get("id")
+                return cast(str | None, kernel.get("id"))
             elif hasattr(kernel, "id"):
-                return kernel.id
+                return cast(str, kernel.id)
         return None
 
     def get_notebook_path(self, name: str) -> str | None:
@@ -255,7 +255,7 @@ class NotebookManager:
             Notebook path or None if not found
         """
         if name in self._notebooks:
-            return self._notebooks[name]["notebook_info"].get("path")
+            return cast(str | None, self._notebooks[name]["notebook_info"].get("path"))
         return None
 
     def is_local_notebook(self, name: str) -> bool:
@@ -269,7 +269,7 @@ class NotebookManager:
             True if local mode, False otherwise
         """
         if name in self._notebooks:
-            return self._notebooks[name].get("is_local", False)
+            return bool(self._notebooks[name].get("is_local", False))
         return False
 
     def get_notebook_connection(self, name: str) -> NotebookConnection:
@@ -306,29 +306,20 @@ class NotebookManager:
         kernel = self._notebooks[name].get("kernel")
         kernel_id = self.get_kernel_id(name)
         if kernel is None:
-            raise RuntimeError(
-                f"Notebook '{name}' has no kernel client (recorded kernel id: {kernel_id})."
-            )
+            raise RuntimeError(f"Notebook '{name}' has no kernel client (recorded kernel id: {kernel_id}).")
         if not hasattr(kernel, "restart"):
-            raise RuntimeError(
-                f"Kernel '{kernel_id}' for notebook '{name}' does not expose restart()."
-            )
+            raise RuntimeError(f"Kernel '{kernel_id}' for notebook '{name}' does not expose restart().")
         try:
             kernel.restart()
         except Exception as exc:
-            raise RuntimeError(
-                f"Kernel '{kernel_id}' restart failed for notebook '{name}': "
-                f"{type(exc).__module__}.{type(exc).__name__}: {exc}"
-            ) from exc
+            raise RuntimeError(f"Kernel '{kernel_id}' restart failed for notebook '{name}': {type(exc).__module__}.{type(exc).__name__}: {exc}") from exc
         return True
 
     def is_empty(self) -> bool:
         """Check if the manager is empty (no notebooks)."""
         return len(self._notebooks) == 0
 
-    def ensure_kernel_alive(
-        self, name: str, kernel_factory: Callable[[], KernelClient]
-    ) -> KernelClient:
+    def ensure_kernel_alive(self, name: str, kernel_factory: Callable[[], KernelClient]) -> KernelClient:
         """
         Ensure a kernel is alive, create if necessary.
 
@@ -366,7 +357,7 @@ class NotebookManager:
             True if set successfully, False if notebook doesn't exist
         """
         if name in self._notebooks:
-            self._current_notebook.set(name)
+            self._current_notebook = name
             return True
         return False
 
@@ -377,12 +368,12 @@ class NotebookManager:
         Returns:
             Current notebook name or None if no active notebook
         """
-        return self._current_notebook.get()
+        return self._current_notebook
 
     def get_current_kernel(self) -> KernelClient | dict[str, Any] | None:
         """
         Get the kernel for the currently active notebook.
-        
+
         Returns:
             Kernel client or None if no active notebook or no kernel found
         """
@@ -409,9 +400,9 @@ class NotebookManager:
             config = get_config()
             return NotebookConnection(
                 {
-                    "server_url": config.document_url,
-                    "token": config.document_token,
-                    "path": config.document_id,
+                    "server_url": config.document_url or "",
+                    "token": config.document_token or "",
+                    "path": config.document_id or "",
                 }
             )
 
@@ -426,7 +417,7 @@ class NotebookManager:
         """
         current = self.get_current_notebook() or self._default_notebook_name
         if current in self._notebooks:
-            return self._notebooks[current]["notebook_info"].get("path")
+            return cast(str | None, self._notebooks[current]["notebook_info"].get("path"))
         return None
 
     def list_all_notebooks(self) -> dict[str, dict[str, Any]]:
@@ -445,9 +436,7 @@ class NotebookManager:
             kernel_status = "unknown"
             if kernel:
                 try:
-                    kernel_status = (
-                        "alive" if hasattr(kernel, "is_alive") and kernel.is_alive() else "dead"
-                    )
+                    kernel_status = "alive" if hasattr(kernel, "is_alive") and kernel.is_alive() else "dead"
                 except Exception as e:
                     kernel_status = f"error ({type(e).__name__}: {e})"
             else:

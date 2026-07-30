@@ -5,9 +5,12 @@
 """Restart notebook tool implementation."""
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from jupyter_server_client import JupyterServerClient
+if TYPE_CHECKING:
+    JupyterServerClient = Any
+else:
+    from jupyter_server_client import JupyterServerClient
 
 from jupyter_mcp_server.notebook_manager import NotebookManager
 from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
@@ -66,8 +69,8 @@ class RestartNotebookTool(BaseTool):
         kernel_spec_manager: Any | None = None,
         notebook_manager: NotebookManager | None = None,
         # Tool-specific parameters
-        notebook_name: str = None,
-        **kwargs,
+        notebook_name: str | None = None,
+        **kwargs: Any,
     ) -> str:
         """Execute the restart_notebook tool.
 
@@ -81,6 +84,11 @@ class RestartNotebookTool(BaseTool):
         Returns:
             Success message
         """
+        if notebook_manager is None:
+            raise ToolError("[restart_notebook] notebook_manager is required.")
+        if notebook_name is None:
+            raise ToolError("[restart_notebook] notebook_name is required.")
+
         if notebook_name not in notebook_manager:
             return f"Notebook '{notebook_name}' is not connected. All currently connected notebooks: {list(notebook_manager.list_all_notebooks().keys())}"
 
@@ -98,31 +106,19 @@ class RestartNotebookTool(BaseTool):
             # (idle-culled on JupyterHub, or the single-user server was restarted),
             # provision a fresh kernel and rebind it instead of failing on a 404.
             if kernel_id not in kernel_manager:
-                logger.info(
-                    f"Kernel {kernel_id} for notebook '{notebook_name}' no longer exists; "
-                    f"provisioning a fresh kernel."
-                )
-                return await self._reprovision_kernel(
-                    kernel_manager, notebook_manager, notebook_name
-                )
+                logger.info(f"Kernel {kernel_id} for notebook '{notebook_name}' no longer exists; provisioning a fresh kernel.")
+                return await self._reprovision_kernel(kernel_manager, notebook_manager, notebook_name)
 
             try:
-                logger.info(
-                    f"Restarting kernel {kernel_id} for notebook '{notebook_name}' in JUPYTER_SERVER mode"
-                )
+                logger.info(f"Restarting kernel {kernel_id} for notebook '{notebook_name}' in JUPYTER_SERVER mode")
                 await kernel_manager.restart_kernel(kernel_id)
                 return f"Notebook '{notebook_name}' kernel restarted successfully. Memory state and imported packages have been cleared."
             except Exception as e:
                 # The kernel may have been culled between the liveness check and the
                 # restart call; treat a now-missing kernel as a reprovision, not a failure.
                 if kernel_id not in kernel_manager:
-                    logger.info(
-                        f"Kernel {kernel_id} for notebook '{notebook_name}' disappeared during "
-                        f"restart; provisioning a fresh kernel."
-                    )
-                    return await self._reprovision_kernel(
-                        kernel_manager, notebook_manager, notebook_name
-                    )
+                    logger.info(f"Kernel {kernel_id} for notebook '{notebook_name}' disappeared during restart; provisioning a fresh kernel.")
+                    return await self._reprovision_kernel(kernel_manager, notebook_manager, notebook_name)
                 logger.error(f"Failed to restart kernel {kernel_id}: {e}")
                 raise ToolError(
                     format_tool_error(
@@ -135,6 +131,7 @@ class RestartNotebookTool(BaseTool):
 
         elif mode == ServerMode.MCP_SERVER:
             kernel_id = notebook_manager.get_kernel_id(notebook_name)
+            kernel_id_for_context = kernel_id or ""
             try:
                 notebook_manager.restart_notebook(notebook_name)
             except Exception as exc:
@@ -145,13 +142,10 @@ class RestartNotebookTool(BaseTool):
                         exc,
                         context={
                             "notebook_name": notebook_name,
-                            "kernel_id": kernel_id,
+                            "kernel_id": kernel_id_for_context,
                         },
                     )
                 ) from exc
-            return (
-                f"Notebook '{notebook_name}' kernel '{kernel_id}' restarted successfully. "
-                "Memory state and imported packages have been cleared."
-            )
+            return f"Notebook '{notebook_name}' kernel restarted successfully. Memory state and imported packages have been cleared. Kernel id: '{kernel_id}'."
         else:
             raise ToolError(f"[restart_notebook] Invalid mode: {mode}")

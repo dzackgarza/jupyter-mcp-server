@@ -16,6 +16,7 @@ filepath.
 from __future__ import annotations
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from binascii import Error as BinasciiError
 from pathlib import PurePosixPath
 
 __all__ = [
@@ -83,4 +84,8 @@ def decode_notebook_id(notebook_id: str) -> str:
 
     encoded = notebook_id[3:]
     encoded += "=" * (-len(encoded) % 4)
-    return normalize_notebook_path(urlsafe_b64decode(encoded).decode())
+    try:
+        decoded = urlsafe_b64decode(encoded).decode()
+    except (BinasciiError, UnicodeDecodeError) as exc:
+        raise ValueError("Invalid notebook ID") from exc
+    return normalize_notebook_path(decoded)

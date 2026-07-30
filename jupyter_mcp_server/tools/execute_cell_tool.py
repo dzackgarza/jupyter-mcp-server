@@ -8,6 +8,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
+from typing import Any
 
 import nbformat
 from mcp.types import ImageContent
@@ -39,8 +40,8 @@ class ExecuteCellTool(BaseTool):
         notebook_path: str,
         cell_index: int,
         outputs: list[str | ImageContent],
-        raw_outputs: list[dict] | None = None,
-    ):
+        raw_outputs: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Write execution outputs back to a notebook cell.
 
         When raw_outputs is given, the kernel's own nbformat-shaped outputs are
@@ -58,9 +59,7 @@ class ExecuteCellTool(BaseTool):
             cell_index = num_cells + cell_index
 
         if cell_index < 0 or cell_index >= num_cells:
-            logger.warning(
-                f"Cell index {cell_index} out of range (notebook has {num_cells} cells), cannot write outputs"
-            )
+            logger.warning(f"Cell index {cell_index} out of range (notebook has {num_cells} cells), cannot write outputs")
             return
 
         cell = notebook.cells[cell_index]
@@ -91,14 +90,8 @@ class ExecuteCellTool(BaseTool):
                         # produced nothing must persist no output, not a
                         # fabricated execute_result.
                         continue
-                    if (
-                        output.startswith("[ERROR:")
-                        or output.startswith("[TIMEOUT ERROR:")
-                        or output.startswith("[PROGRESS:")
-                    ):
-                        cell.outputs.append(
-                            nbformat.v4.new_output(output_type="stream", name="stdout", text=output)
-                        )
+                    if output.startswith("[ERROR:") or output.startswith("[TIMEOUT ERROR:") or output.startswith("[PROGRESS:"):
+                        cell.outputs.append(nbformat.v4.new_output(output_type="stream", name="stdout", text=output))
                     else:
                         cell.outputs.append(
                             nbformat.v4.new_output(
@@ -133,19 +126,20 @@ class ExecuteCellTool(BaseTool):
     async def execute(
         self,
         mode: ServerMode,
-        server_client=None,
-        contents_manager=None,
-        kernel_manager=None,
-        kernel_spec_manager=None,
-        notebook_manager=None,
-        serverapp=None,
+        server_client: Any | None = None,
+        kernel_client: Any | None = None,
+        contents_manager: Any | None = None,
+        kernel_manager: Any | None = None,
+        kernel_spec_manager: Any | None = None,
+        notebook_manager: Any | None = None,
+        serverapp: Any | None = None,
         # Tool-specific parameters
-        cell_index: int = None,
+        cell_index: int | None = None,
         timeout_seconds: int | None = 60,
         stream: bool = False,
         progress_interval: int = 5,
-        ensure_kernel_alive_fn=None,
-        **kwargs,
+        ensure_kernel_alive_fn: Any | None = None,
+        **kwargs: Any,
     ) -> list[str | ImageContent]:
         """Execute a cell with configurable timeout and optional streaming progress updates.
 
@@ -163,6 +157,10 @@ class ExecuteCellTool(BaseTool):
         Returns:
             List of outputs from the executed cell
         """
+        if cell_index is None:
+            raise ValueError("cell_index is required")
+        execution_timeout = timeout_seconds if timeout_seconds is not None else 300
+
         if mode == ServerMode.JUPYTER_SERVER:
             # JUPYTER_SERVER mode: Use ExecutionStack with YDoc awareness
             from jupyter_mcp_server.jupyter_extension.context import get_server_context
@@ -177,6 +175,8 @@ class ExecuteCellTool(BaseTool):
 
             # Get notebook_path and kernel_id first
             notebook_path, kernel_id = get_current_notebook_context(notebook_manager)
+            if notebook_path is None:
+                raise ValueError("notebook_path is required")
 
             # Resolve to absolute path
             if notebook_path and serverapp and not Path(notebook_path).is_absolute():
@@ -202,10 +202,10 @@ class ExecuteCellTool(BaseTool):
                         server_url="local",
                         path=notebook_path,
                     )
+            if kernel_id is None:
+                raise ValueError("kernel_id is required")
 
-            logger.info(
-                f"Executing cell {cell_index} in JUPYTER_SERVER mode (timeout: {timeout_seconds}s)"
-            )
+            logger.info(f"Executing cell {cell_index} in JUPYTER_SERVER mode (timeout: {timeout_seconds}s)")
 
             # Get file_id from file_id_manager
             file_id_manager = serverapp.web_app.settings.get("file_id_manager")
@@ -225,9 +225,7 @@ class ExecuteCellTool(BaseTool):
 
                 num_cells = len(ydoc.ycells)
                 if cell_index >= num_cells:
-                    raise ValueError(
-                        f"Cell index {cell_index} out of range (notebook has {num_cells} cells)"
-                    )
+                    raise ValueError(f"Cell index {cell_index} out of range (notebook has {num_cells} cells)")
 
                 cell_id = ydoc.ycells[cell_index].get("id")
                 cell_source = ydoc.ycells[cell_index].get("source")
@@ -249,7 +247,7 @@ class ExecuteCellTool(BaseTool):
                     code=code_to_execute,
                     document_id=document_id,
                     cell_id=cell_id,
-                    timeout=timeout_seconds,
+                    timeout=execution_timeout,
                 )
 
                 return outputs
@@ -262,9 +260,7 @@ class ExecuteCellTool(BaseTool):
 
                 num_cells = len(notebook.cells)
                 if cell_index >= num_cells:
-                    raise ValueError(
-                        f"Cell index {cell_index} out of range (notebook has {num_cells} cells)"
-                    )
+                    raise ValueError(f"Cell index {cell_index} out of range (notebook has {num_cells} cells)")
 
                 cell = notebook.cells[cell_index]
                 if cell.cell_type != "code":
@@ -275,23 +271,25 @@ class ExecuteCellTool(BaseTool):
                     return []
 
                 # Execute without RTC metadata
-                raw_outputs: list[dict] = []
+                raw_outputs: list[dict[str, Any]] = []
                 outputs = await execute_via_execution_stack(
                     serverapp=serverapp,
                     kernel_id=kernel_id,
                     code=code_to_execute,
-                    timeout=timeout_seconds,
+                    timeout=execution_timeout,
                     raw_outputs=raw_outputs,
                 )
 
                 # Write outputs back to file
-                await self._write_outputs_to_cell(
-                    notebook_path, cell_index, outputs, raw_outputs=raw_outputs
-                )
+                await self._write_outputs_to_cell(notebook_path, cell_index, outputs, raw_outputs=raw_outputs)
 
                 return outputs
 
         elif mode == ServerMode.MCP_SERVER:
+            if ensure_kernel_alive_fn is None:
+                raise ValueError("ensure_kernel_alive_fn is required")
+            if notebook_manager is None:
+                raise ValueError("notebook_manager is required")
             kernel = ensure_kernel_alive_fn()
             # A freshly created kernel's websocket may not be connected yet;
             # waiting for idle alone races the handshake.
@@ -303,9 +301,7 @@ class ExecuteCellTool(BaseTool):
             async with notebook_manager.get_current_connection() as notebook:
                 num_cells = len(notebook)
                 if cell_index >= num_cells:
-                    raise ValueError(
-                        f"Cell index {cell_index} out of range (notebook has {num_cells} cells)"
-                    )
+                    raise ValueError(f"Cell index {cell_index} out of range (notebook has {num_cells} cells)")
 
                 cell_source = str(notebook[cell_index].get("source", ""))
                 hooks = HookRegistry.get_instance()
@@ -318,16 +314,12 @@ class ExecuteCellTool(BaseTool):
 
                 if stream:
                     # Streaming mode: Real-time monitoring with progress updates
-                    logger.info(
-                        f"Executing cell {cell_index} in streaming mode (timeout: {timeout_seconds}s, interval: {progress_interval}s)"
-                    )
+                    logger.info(f"Executing cell {cell_index} in streaming mode (timeout: {timeout_seconds}s, interval: {progress_interval}s)")
 
-                    outputs_log = []
+                    outputs_log: list[str | ImageContent] = []
 
                     # Start execution in background
-                    execution_task = asyncio.create_task(
-                        execute_cell_thread_safe(notebook, cell_index, kernel)
-                    )
+                    execution_task = asyncio.create_task(execute_cell_thread_safe(notebook, cell_index, kernel))
                     track_pending_execution(kernel, execution_task)
 
                     start_time = time.time()
@@ -340,17 +332,12 @@ class ExecuteCellTool(BaseTool):
 
                         # Check timeout
                         if timeout_seconds is not None and elapsed > timeout_seconds:
-                            execution_task.cancel()
                             timed_out = True
                             outputs_log.append(f"[TIMEOUT at {elapsed:.1f}s: Cancelling execution]")
                             try:
                                 kernel.interrupt()
                                 outputs_log.append("[Sent interrupt signal to kernel]")
                             except Exception:
-                                pass
-                            try:
-                                await execution_task
-                            except asyncio.CancelledError:
                                 pass
                             break
 
@@ -373,9 +360,7 @@ class ExecuteCellTool(BaseTool):
 
                         # Progress update
                         if int(elapsed) % progress_interval == 0 and elapsed > 0:
-                            outputs_log.append(
-                                f"[PROGRESS: {elapsed:.1f}s elapsed, {last_output_count} outputs so far]"
-                            )
+                            outputs_log.append(f"[PROGRESS: {elapsed:.1f}s elapsed, {last_output_count} outputs so far]")
 
                         await asyncio.sleep(1)
 
@@ -401,40 +386,32 @@ class ExecuteCellTool(BaseTool):
                         except Exception as e:
                             outputs_log.append(f"[ERROR: {e}]")
 
-                    result = outputs_log if outputs_log else ["[No output generated]"]
+                    stream_result: list[str | ImageContent] = outputs_log if outputs_log else ["[No output generated]"]
                     await hooks.fire(
                         HookEvent.AFTER_EXECUTE,
                         code=cell_source,
                         kernel_id=kid,
                         metadata={},
-                        outputs=result,
+                        outputs=stream_result,
                         error=None,
                         context=hook_ctx,
                     )
-                    return result
+                    return stream_result
 
                 else:
                     # Non-streaming mode: Use forced synchronization
-                    deadline = (
-                        f"{timeout_seconds}s timeout"
-                        if timeout_seconds is not None
-                        else "no execution deadline"
-                    )
+                    deadline = f"{timeout_seconds}s timeout" if timeout_seconds is not None else "no execution deadline"
                     logger.info(f"Starting execution of cell {cell_index} with {deadline}")
 
                     try:
                         # Use the forced sync function
-                        await execute_cell_with_forced_sync(
-                            notebook, cell_index, kernel, timeout_seconds
-                        )
+                        await execute_cell_with_forced_sync(notebook, cell_index, kernel, timeout_seconds)
 
                         # Get final outputs
                         outputs = notebook[cell_index].get("outputs", [])
-                        result = safe_extract_outputs(outputs)
+                        result: list[str | ImageContent] = safe_extract_outputs(outputs)
 
-                        logger.info(
-                            f"Cell {cell_index} completed successfully with {len(result)} outputs"
-                        )
+                        logger.info(f"Cell {cell_index} completed successfully with {len(result)} outputs")
                         await hooks.fire(
                             HookEvent.AFTER_EXECUTE,
                             code=cell_source,
@@ -446,7 +423,7 @@ class ExecuteCellTool(BaseTool):
                         )
                         return result
 
-                    except asyncio.TimeoutError as e:
+                    except TimeoutError as e:
                         logger.error(f"Cell {cell_index} execution timed out: {e}")
                         try:
                             if kernel and hasattr(kernel, "interrupt"):
@@ -459,9 +436,7 @@ class ExecuteCellTool(BaseTool):
                         try:
                             outputs = notebook[cell_index].get("outputs", [])
                             partial_outputs = safe_extract_outputs(outputs)
-                            partial_outputs.append(
-                                f"[TIMEOUT ERROR: Execution exceeded {timeout_seconds} seconds]"
-                            )
+                            partial_outputs.append(f"[TIMEOUT ERROR: Execution exceeded {timeout_seconds} seconds]")
                             await hooks.fire(
                                 HookEvent.AFTER_EXECUTE,
                                 code=cell_source,
@@ -475,9 +450,7 @@ class ExecuteCellTool(BaseTool):
                         except Exception:
                             pass
 
-                        timeout_result = [
-                            f"[TIMEOUT ERROR: Cell execution exceeded {timeout_seconds} seconds and was interrupted]"
-                        ]
+                        timeout_result: list[str | ImageContent] = [f"[TIMEOUT ERROR: Cell execution exceeded {timeout_seconds} seconds and was interrupted]"]
                         await hooks.fire(
                             HookEvent.AFTER_EXECUTE,
                             code=cell_source,

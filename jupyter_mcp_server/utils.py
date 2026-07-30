@@ -3,20 +3,38 @@
 # BSD 3-Clause License
 
 import asyncio
+import importlib
 import re
 import time
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
-from jupyter_kernel_client import get_mimebundle_text
-from jupyter_nbmodel_client import NotebookModel
-from jupyter_nbmodel_client.model import save_in_notebook_hook
 from mcp.types import ImageContent
 
 from jupyter_mcp_server.config import ALLOW_IMG_OUTPUT
 from jupyter_mcp_server.hooks import HookEvent, HookRegistry
 
+if TYPE_CHECKING:
+    KernelClient = Any
+    NotebookModel = Any
 
-def get_current_notebook_context(notebook_manager=None):
+    def get_mimebundle_text(data: dict[str, Any]) -> str | None: ...
+
+    def save_in_notebook_hook(
+        lock: Any,
+        outputs: list[Any],
+        ycell: Any,
+        changes_origin: Any,
+        message: Any,
+    ) -> None: ...
+
+else:
+    from jupyter_kernel_client import get_mimebundle_text
+    from jupyter_nbmodel_client import NotebookModel
+    from jupyter_nbmodel_client.model import save_in_notebook_hook
+
+
+def get_current_notebook_context(notebook_manager: Any | None = None) -> tuple[str | None, str | None]:
     """
     Get the current notebook path and kernel ID for JUPYTER_SERVER mode.
 
@@ -50,12 +68,12 @@ def get_current_notebook_context(notebook_manager=None):
 
 
 def resolve_url_and_token_variables(
-    jupyter_url,
-    jupyter_token,
-    document_url,
-    document_token,
-    runtime_url,
-    runtime_token,
+    jupyter_url: str | None,
+    jupyter_token: str | None,
+    document_url: str | None,
+    document_token: str | None,
+    runtime_url: str | None,
+    runtime_token: str | None,
 ) -> tuple[str, str | None, str, str | None]:
     """Resolve merged URL/token settings with per-field precedence."""
 
@@ -95,7 +113,7 @@ _TRUE_VALUES = frozenset({"1", "true", "t", "yes", "y", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "f", "no", "n", "off"})
 
 
-def parse_bool_option(value, option_name: str) -> bool:
+def parse_bool_option(value: Any, option_name: str) -> bool:
     """Parse a CLI boolean option that accepts explicit True/False values."""
     if isinstance(value, bool):
         return value
@@ -122,7 +140,7 @@ def do_start(
     open_notebook_in_ui: bool,
     allowed_jupyter_mcp_tools: str,
     otel_file: str = "",
-    mcp_token: str = None,
+    mcp_token: str | None = None,
     insecure_mcp_noauth: bool = False,
     reconnect_interval: int = 0,
     execution_timeout: int = 120,
@@ -132,7 +150,7 @@ def do_start(
     runtime_channels_url: str | None = None,
     sandbox_environment: str | None = None,
     sandbox_gpu: str | None = None,
-):
+) -> None:
     """Shared startup routine used by Typer CLI surfaces."""
 
     import asyncio
@@ -151,11 +169,7 @@ def do_start(
             "explicitly allow unauthenticated access."
         )
 
-    logger.info(
-        f"Start command received - runtime_url: {runtime_url!r}, "
-        f"document_url: {document_url!r}, provider: {provider}, "
-        f"transport: {transport}"
-    )
+    logger.info(f"Start command received - runtime_url: {runtime_url!r}, document_url: {document_url!r}, provider: {provider}, transport: {transport}")
 
     config = set_config(
         transport=transport,
@@ -225,10 +239,7 @@ def do_start(
             mcp._token_verifier = RuntimeTokenVerifier(mcp_token)
             logger.info("MCP endpoint token authentication enabled (using MCP_TOKEN)")
         elif insecure_mcp_noauth:
-            logger.warning(
-                "MCP endpoint authentication DISABLED (--insecure-mcp-noauth). "
-                "Any client can connect without credentials. Not recommended for production."
-            )
+            logger.warning("MCP endpoint authentication DISABLED (--insecure-mcp-noauth). Any client can connect without credentials. Not recommended for production.")
         else:
             assert False, "early validation should have caught missing MCP auth config"
 
@@ -264,7 +275,7 @@ def extract_output(output: dict | Any) -> str | ImageContent:
 
     # Handle lists (common in error tracebacks)
     if isinstance(output, list):
-        return "\n".join(extract_output(item) for item in output)
+        return "\n".join(str(extract_output(item)) for item in output)
 
     # Handle traditional dictionary format
     if not isinstance(output, dict):
@@ -302,10 +313,7 @@ def extract_output(output: dict | Any) -> str | ImageContent:
         # lives in jupyter-kernel-client so every consumer of the client shares
         # the same selection. Unwrap CRDT YText values to their source first,
         # matching how the other branches here read bundle values.
-        text_bundle = {
-            mime: str(value.source) if hasattr(value, "source") else value
-            for mime, value in data.items()
-        }
+        text_bundle = {mime: str(value.source) if hasattr(value, "source") else value for mime, value in data.items()}
         rich_text = get_mimebundle_text(text_bundle)
         if rich_text is not None:
             return strip_ansi_codes(rich_text)
@@ -339,7 +347,7 @@ def strip_ansi_codes(text: str) -> str:
     return ansi_escape.sub("", text)
 
 
-def clean_notebook_outputs(notebook):
+def clean_notebook_outputs(notebook: Any) -> None:
     """Remove transient fields from all cell outputs.
 
     The 'transient' field is part of the Jupyter kernel messaging protocol
@@ -368,7 +376,7 @@ def safe_extract_outputs(outputs: Any) -> list[str | ImageContent]:
     if not outputs:
         return []
 
-    result = []
+    result: list[str | ImageContent] = []
 
     # Handle CRDT YArray or list of outputs
     if hasattr(outputs, "__iter__") and not isinstance(outputs, (str, dict)):
@@ -460,7 +468,7 @@ def format_TSV(headers: list[str], rows: list[list[str]]) -> str:
 ###############################################################################
 
 
-def create_kernel(config, logger):
+def create_kernel(config: Any, logger: Any) -> Any:
     """Create a new kernel instance using current configuration.
 
     When ``config.sandbox_variant`` is 'jupyter' (the default) a
@@ -475,8 +483,7 @@ def create_kernel(config, logger):
     if extension_kernel is not None:
         return extension_kernel
 
-    from jupyter_kernel_client import KernelClient
-
+    KernelClient = getattr(importlib.import_module("jupyter_kernel_client"), "KernelClient")
     kernel = None
     try:
         # Initialize the kernel client with the provided parameters.
@@ -505,7 +512,7 @@ def create_kernel(config, logger):
         raise
 
 
-def start_kernel(notebook_manager, config, logger):
+def start_kernel(notebook_manager: Any, config: Any, logger: Any) -> None:
     """Start the Jupyter kernel with error handling (for backward compatibility)."""
     try:
         # Remove existing default notebook if any
@@ -521,12 +528,12 @@ def start_kernel(notebook_manager, config, logger):
         raise
 
 
-def ensure_kernel_alive(notebook_manager, current_notebook, create_kernel_fn):
+def ensure_kernel_alive(notebook_manager: Any, current_notebook: str, create_kernel_fn: Callable[[], Any]) -> Any:
     """Ensure kernel is running, restart if needed."""
     return notebook_manager.ensure_kernel_alive(current_notebook, create_kernel_fn)
 
 
-def track_pending_execution(kernel, task):
+def track_pending_execution(kernel: Any, task: asyncio.Task[Any]) -> None:
     """Remember a background execute_cell task on the kernel so is_kernel_busy
     can see it, and forget it once the task actually finishes.
 
@@ -539,15 +546,18 @@ def track_pending_execution(kernel, task):
     """
     kernel._mcp_pending_execution = task
 
-    def _clear(finished_task, kernel=kernel):
+    def _clear(finished_task: asyncio.Task[Any], kernel: Any = kernel) -> None:
         if getattr(kernel, "_mcp_pending_execution", None) is finished_task:
             kernel._mcp_pending_execution = None
 
     task.add_done_callback(_clear)
 
 
-async def execute_cell_thread_safe(notebook, cell_index, kernel):
+async def execute_cell_thread_safe(notebook: Any, cell_index: int, kernel: Any) -> Any:
     """Execute kernel I/O off-loop while keeping every YDoc object on its owner thread."""
+    if not hasattr(notebook, "_doc") or not hasattr(notebook, "_lock"):
+        return await asyncio.to_thread(notebook.execute_cell, cell_index, kernel)
+
     ycell = notebook._doc.ycells[cell_index]
     with notebook._lock:
         source = ycell["source"].to_py()
@@ -559,14 +569,14 @@ async def execute_cell_thread_safe(notebook, cell_index, kernel):
             ycell["execution_state"] = "running"
 
     loop = asyncio.get_running_loop()
-    messages: asyncio.Queue = asyncio.Queue()
+    messages: asyncio.Queue[Any] = asyncio.Queue()
     finished = object()
-    outputs = []
+    outputs: list[Any] = []
 
-    def enqueue_output(message):
+    def enqueue_output(message: Any) -> None:
         loop.call_soon_threadsafe(messages.put_nowait, message)
 
-    def execute_kernel():
+    def execute_kernel() -> Any:
         try:
             return kernel.execute_interactive(
                 source,
@@ -619,11 +629,11 @@ async def execute_cell_thread_safe(notebook, cell_index, kernel):
 
 
 async def execute_cell_with_forced_sync(
-    notebook,
-    cell_index,
-    kernel,
+    notebook: Any,
+    cell_index: int,
+    kernel: Any,
     timeout_seconds: int | None = 300,
-):
+) -> None:
     """Execute cell with forced real-time synchronization."""
     from jupyter_mcp_server.log import logger
 
@@ -639,17 +649,12 @@ async def execute_cell_with_forced_sync(
         elapsed = time.time() - start_time
 
         if timeout_seconds is not None and elapsed > timeout_seconds:
-            execution_future.cancel()
             try:
                 if hasattr(kernel, "interrupt"):
                     kernel.interrupt()
             except Exception:
                 pass
-            try:
-                await execution_future
-            except asyncio.CancelledError:
-                pass
-            raise asyncio.TimeoutError(f"Cell execution timed out after {timeout_seconds} seconds")
+            raise TimeoutError(f"Cell execution timed out after {timeout_seconds} seconds")
 
         # Check for new outputs and try to trigger sync
         try:
@@ -658,9 +663,7 @@ async def execute_cell_with_forced_sync(
 
             if len(current_outputs) > last_output_count:
                 last_output_count = len(current_outputs)
-                logger.info(
-                    f"Cell {cell_index} progress: {len(current_outputs)} outputs after {elapsed:.1f}s"
-                )
+                logger.info(f"Cell {cell_index} progress: {len(current_outputs)} outputs after {elapsed:.1f}s")
 
                 # Try different sync methods
                 try:
@@ -691,7 +694,7 @@ async def execute_cell_with_forced_sync(
     return None
 
 
-def is_kernel_busy(kernel):
+def is_kernel_busy(kernel: Any) -> bool:
     """Check if kernel is currently executing something.
 
     Reflects the task recorded by track_pending_execution, not
@@ -704,7 +707,7 @@ def is_kernel_busy(kernel):
     return task is not None and not task.done()
 
 
-async def wait_for_kernel_idle(kernel, max_wait_seconds=60):
+async def wait_for_kernel_idle(kernel: Any, max_wait_seconds: int = 60) -> None:
     """Wait for kernel to become idle before proceeding."""
     from jupyter_mcp_server.log import logger
 
@@ -718,7 +721,7 @@ async def wait_for_kernel_idle(kernel, max_wait_seconds=60):
         await asyncio.sleep(1)
 
 
-async def wait_for_kernel_ready(kernel, max_wait_seconds=10):
+async def wait_for_kernel_ready(kernel: Any, max_wait_seconds: int = 10) -> None:
     """Wait for the kernel websocket connection to be ready."""
     from jupyter_mcp_server.log import logger
 
@@ -739,7 +742,9 @@ async def wait_for_kernel_ready(kernel, max_wait_seconds=10):
             logger.warning(f"Kernel connection not ready after {max_wait_seconds}s, proceeding anyway")
             break
         await asyncio.sleep(0.5)
-async def safe_notebook_operation(operation_func, max_retries=3):
+
+
+async def safe_notebook_operation(operation_func: Callable[[], Awaitable[Any]], max_retries: int = 3) -> Any:
     """Safely execute notebook operations with connection recovery.
 
     Retries on WebSocket / connection-closed errors up to *max_retries* times
@@ -757,9 +762,12 @@ async def safe_notebook_operation(operation_func, max_retries=3):
     except ImportError:
         WsConnectionClosed = _NeverMatch  # type: ignore[misc,assignment]
     try:
-        from jupyter_nbmodel_client import WebSocketClosedError as NbWsClosedError
-    except (ImportError, AttributeError):
-        NbWsClosedError = _NeverMatch  # type: ignore[misc,assignment]
+        NbWsClosedError = getattr(
+            importlib.import_module("jupyter_nbmodel_client"),
+            "WebSocketClosedError",
+        )
+    except ImportError, AttributeError:
+        NbWsClosedError = _NeverMatch
 
     def _is_connection_error(exc: BaseException) -> bool:
         """Return True if *exc* is a retryable connection-closed error."""
@@ -818,9 +826,7 @@ async def safe_notebook_operation(operation_func, max_retries=3):
                 raise
 
     # Should be unreachable, but be defensive.
-    raise Exception(
-        f"Unexpected state in safe_notebook_operation retry logic.  Last error: {last_error}"
-    )
+    raise Exception(f"Unexpected state in safe_notebook_operation retry logic.  Last error: {last_error}")
 
 
 ###############################################################################
@@ -832,12 +838,12 @@ async def execute_via_execution_stack(
     serverapp: Any,
     kernel_id: str,
     code: str,
-    document_id: str = None,
-    cell_id: str = None,
+    document_id: str | None = None,
+    cell_id: str | None = None,
     timeout: int = 300,
     poll_interval: float = 0.1,
-    logger=None,
-    raw_outputs: list | None = None,
+    logger: Any | None = None,
+    raw_outputs: list[dict[str, Any]] | None = None,
 ) -> list[str | ImageContent]:
     """Execute code using ExecutionStack (JUPYTER_SERVER mode with jupyter-server-nbmodel).
 
@@ -874,9 +880,7 @@ async def execute_via_execution_stack(
 
     try:
         # Get the ExecutionStack from the jupyter_server_nbmodel extension
-        nbmodel_extensions = serverapp.extension_manager.extension_apps.get(
-            "jupyter_server_nbmodel", set()
-        )
+        nbmodel_extensions = serverapp.extension_manager.extension_apps.get("jupyter_server_nbmodel", set())
         if not nbmodel_extensions:
             raise RuntimeError("jupyter_server_nbmodel extension not found. Please install it.")
 
@@ -923,9 +927,7 @@ async def execute_via_execution_stack(
                     if "error" in result:
                         error_info = result["error"]
                         logger.error(f"Execution error: {error_info}")
-                        error_output = [
-                            f"[ERROR: {error_info.get('ename', 'Unknown')}: {error_info.get('evalue', '')}]"
-                        ]
+                        error_output: list[str | ImageContent] = [f"[ERROR: {error_info.get('ename', 'Unknown')}: {error_info.get('evalue', '')}]"]
                         if raw_outputs is not None:
                             raw_outputs.append(
                                 {
@@ -968,9 +970,7 @@ async def execute_via_execution_stack(
                         formatted = safe_extract_outputs(outputs)
                         if raw_outputs is not None:
                             raw_outputs.extend(outputs)
-                        logger.info(
-                            f"Execution completed with {len(formatted)} formatted outputs: {formatted}"
-                        )
+                        logger.info(f"Execution completed with {len(formatted)} formatted outputs: {formatted}")
                     else:
                         formatted = []
                         logger.info("Execution completed with no outputs")
@@ -988,13 +988,10 @@ async def execute_via_execution_stack(
                 # Still pending, wait before next poll
                 await asyncio.sleep(poll_interval)
 
-        except (asyncio.CancelledError, TimeoutError):
+        except asyncio.CancelledError, TimeoutError:
             # Clean up the orphaned execution request to prevent subsequent
             # execute_cell calls from hanging on stale state.
-            logger.warning(
-                f"Execution request {request_id} interrupted, "
-                f"cancelling kernel {kernel_id} execution"
-            )
+            logger.warning(f"Execution request {request_id} interrupted, cancelling kernel {kernel_id} execution")
             try:
                 execution_stack.cancel(kernel_id)
             except Exception as cancel_err:
@@ -1007,7 +1004,12 @@ async def execute_via_execution_stack(
 
 
 async def execute_code_local(
-    serverapp, notebook_path: str, code: str, kernel_id: str, timeout: int = 300, logger=None
+    serverapp: Any,
+    notebook_path: str,
+    code: str,
+    kernel_id: str,
+    timeout: int = 300,
+    logger: Any | None = None,
 ) -> list[str | ImageContent]:
     """Execute code in a kernel and return outputs (JUPYTER_SERVER mode).
 
@@ -1080,7 +1082,7 @@ async def execute_code_local(
         await asyncio.sleep(0.01)
 
         # Prepare to collect outputs
-        outputs = []
+        outputs: list[dict[str, Any]] = []
         execution_done = False
         grace_period_ms = 100  # Wait 100ms after shell reply for remaining IOPub messages
         execution_done_time = None
@@ -1095,33 +1097,21 @@ async def execute_code_local(
         timeout_ms = timeout * 1000
         start_time = asyncio.get_event_loop().time()
 
-        while not execution_done or (
-            execution_done_time
-            and (asyncio.get_event_loop().time() - execution_done_time) * 1000 < grace_period_ms
-        ):
+        while not execution_done or (execution_done_time and (asyncio.get_event_loop().time() - execution_done_time) * 1000 < grace_period_ms):
             elapsed_ms = (asyncio.get_event_loop().time() - start_time) * 1000
             remaining_ms = max(0, timeout_ms - elapsed_ms)
 
             # If execution is done and grace period expired, exit
-            if (
-                execution_done
-                and execution_done_time
-                and (asyncio.get_event_loop().time() - execution_done_time) * 1000
-                >= grace_period_ms
-            ):
+            if execution_done and execution_done_time and (asyncio.get_event_loop().time() - execution_done_time) * 1000 >= grace_period_ms:
                 break
 
             if remaining_ms <= 0:
                 client.stop_channels()
-                logger.warning(
-                    f"Code execution timeout after {timeout}s, collected {len(outputs)} outputs"
-                )
+                logger.warning(f"Code execution timeout after {timeout}s, collected {len(outputs)} outputs")
                 return [f"[TIMEOUT ERROR: Code execution exceeded {timeout} seconds]"]
 
             # Use shorter poll timeout during grace period
-            poll_timeout = (
-                min(remaining_ms, grace_period_ms / 2) if execution_done else remaining_ms
-            )
+            poll_timeout = min(remaining_ms, grace_period_ms / 2) if execution_done else remaining_ms
             events = dict(await poller.poll(poll_timeout))
 
             if not events:
@@ -1150,9 +1140,7 @@ async def execute_code_local(
                                 "text": content.get("text", ""),
                             }
                         )
-                        logger.debug(
-                            f"Collected stream output: {len(content.get('text', ''))} chars"
-                        )
+                        logger.debug(f"Collected stream output: {len(content.get('text', ''))} chars")
                     elif msg_type == "execute_result":
                         outputs.append(
                             {
@@ -1162,9 +1150,7 @@ async def execute_code_local(
                                 "execution_count": content.get("execution_count"),
                             }
                         )
-                        logger.debug(
-                            f"Collected execute_result, count: {content.get('execution_count')}"
-                        )
+                        logger.debug(f"Collected execute_result, count: {content.get('execution_count')}")
                     elif msg_type == "display_data":
                         # Note: 'transient' field from kernel messages is NOT part of nbformat schema
                         # Only include 'output_type', 'data', and 'metadata' fields
@@ -1194,13 +1180,8 @@ async def execute_code_local(
                 if isawaitable(reply):
                     reply = await reply
 
-                if (
-                    reply
-                    and reply.get("parent_header", {}).get("msg_id") == msg_id["header"]["msg_id"]
-                ):
-                    logger.debug(
-                        f"Execution complete, reply status: {reply.get('content', {}).get('status')}"
-                    )
+                if reply and reply.get("parent_header", {}).get("msg_id") == msg_id["header"]["msg_id"]:
+                    logger.debug(f"Execution complete, reply status: {reply.get('content', {}).get('status')}")
                     execution_done = True
                     execution_done_time = asyncio.get_event_loop().time()
 
@@ -1231,7 +1212,12 @@ async def execute_code_local(
 
 
 async def execute_cell_local(
-    serverapp, notebook_path: str, cell_index: int, kernel_id: str, timeout: int = 300, logger=None
+    serverapp: Any,
+    notebook_path: str,
+    cell_index: int,
+    kernel_id: str,
+    timeout: int = 300,
+    logger: Any | None = None,
 ) -> list[str | ImageContent]:
     """Execute a cell in a notebook and return outputs (JUPYTER_SERVER mode).
 
@@ -1282,9 +1268,7 @@ async def execute_cell_local(
         if ydoc:
             # YDoc path - read from collaborative document
             if cell_index < 0 or cell_index >= len(ydoc.ycells):
-                raise ValueError(
-                    f"Cell index {cell_index} out of range. Notebook has {len(ydoc.ycells)} cells."
-                )
+                raise ValueError(f"Cell index {cell_index} out of range. Notebook has {len(ydoc.ycells)} cells.")
 
             cell = ydoc.ycells[cell_index]
 
@@ -1329,9 +1313,7 @@ async def execute_cell_local(
             cell["outputs"] = []
             for output in outputs:
                 if isinstance(output, str):
-                    cell["outputs"].append(
-                        {"output_type": "stream", "name": "stdout", "text": output}
-                    )
+                    cell["outputs"].append({"output_type": "stream", "name": "stdout", "text": output})
 
             return outputs
         else:
@@ -1345,9 +1327,7 @@ async def execute_cell_local(
 
             # Validate cell index
             if cell_index < 0 or cell_index >= len(notebook.cells):
-                raise ValueError(
-                    f"Cell index {cell_index} out of range. Notebook has {len(notebook.cells)} cells."
-                )
+                raise ValueError(f"Cell index {cell_index} out of range. Notebook has {len(notebook.cells)} cells.")
 
             cell = notebook.cells[cell_index]
 
@@ -1387,16 +1367,10 @@ async def execute_cell_local(
             for output in outputs:
                 if isinstance(output, str):
                     # Create a stream output
-                    cell.outputs.append(
-                        nbformat.v4.new_output(output_type="stream", name="stdout", text=output)
-                    )
+                    cell.outputs.append(nbformat.v4.new_output(output_type="stream", name="stdout", text=output))
                 elif isinstance(output, ImageContent):
                     # Create a display_data output with image
-                    cell.outputs.append(
-                        nbformat.v4.new_output(
-                            output_type="display_data", data={"image/png": output.data}
-                        )
-                    )
+                    cell.outputs.append(nbformat.v4.new_output(output_type="display_data", data={"image/png": output.data}))
 
             # Write notebook back
             with open(notebook_path, "w", encoding="utf-8") as f:
@@ -1410,7 +1384,7 @@ async def execute_cell_local(
         return [f"[ERROR: {e!s}]"]
 
 
-async def get_jupyter_ydoc(serverapp: Any, file_id: str):
+async def get_jupyter_ydoc(serverapp: Any, file_id: str) -> Any | None:
     """Get the YNotebook document if it's currently open in a collaborative session.
 
     This follows the jupyter_ai_tools pattern of accessing YDoc through the
@@ -1458,7 +1432,7 @@ async def get_jupyter_ydoc(serverapp: Any, file_id: str):
     return None
 
 
-async def get_notebook_model(serverapp: Any, notebook_path: str):
+async def get_notebook_model(serverapp: Any, notebook_path: str) -> Any | None:
     """Get the NotebookModel instance if it's currently open in a collaborative session."""
     # Get file_id from file_id_manager
     file_id_manager = serverapp.web_app.settings.get("file_id_manager")
@@ -1474,7 +1448,7 @@ async def get_notebook_model(serverapp: Any, notebook_path: str):
     return nb
 
 
-def clean_mcp_response_content(content_item):
+def clean_mcp_response_content(content_item: Any) -> Any:
     """
     Clean MCP response content by filtering out null annotations and meta fields.
 
@@ -1498,7 +1472,7 @@ def clean_mcp_response_content(content_item):
     return content_item
 
 
-def clean_mcp_response(response_dict):
+def clean_mcp_response(response_dict: Any) -> Any:
     """
     Clean MCP response by filtering out null annotations and meta fields from all content items.
 

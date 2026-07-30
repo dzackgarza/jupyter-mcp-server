@@ -25,43 +25,62 @@ $ pytest tests/test_edit_cell_source.py -v
 ```
 """
 
+from collections.abc import Awaitable, Callable
+from typing import ParamSpec, TypeVar, cast
+
 import pytest
 
 ###############################################################################
 # Section A — Unit Tests (no server needed)
 ###############################################################################
+from jupyter_mcp_server.tools._base import ToolError
 from jupyter_mcp_server.tools.edit_cell_source_tool import EditCellSourceTool
 
 from .test_common import MCPClient, timeout_wrapper
+
+P = ParamSpec("P")
+R = TypeVar("R")
+F = TypeVar("F", bound=Callable[..., object])
+
+_asyncio_mark = cast(Callable[[F], F], pytest.mark.asyncio)
+
+
+def _typed_timeout_wrapper(
+    timeout_seconds: int,
+) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
+    return cast(
+        Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]],
+        timeout_wrapper(timeout_seconds),
+    )
 
 
 class TestEditCellSourceValidation:
     """Tests for _validate_edit(): input validation before applying edits."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         self.tool = EditCellSourceTool()
 
-    def test_empty_old_string_raises_error(self):
+    def test_empty_old_string_raises_error(self) -> None:
         """Empty old_string must be rejected."""
         with pytest.raises(ToolError, match="must not be empty"):
             self.tool._validate_edit("some source", "", "replacement", False, 0)
 
-    def test_old_string_not_found_raises_error(self):
+    def test_old_string_not_found_raises_error(self) -> None:
         """old_string that doesn't exist in source must be rejected."""
         with pytest.raises(ToolError, match="not found"):
             self.tool._validate_edit("hello world", "xyz", "abc", False, 0)
 
-    def test_old_string_ambiguous_without_replace_all(self):
+    def test_old_string_ambiguous_without_replace_all(self) -> None:
         """Multiple matches without replace_all=True must be rejected."""
         with pytest.raises(ToolError, match="not unique"):
             self.tool._validate_edit("aaa", "a", "b", False, 0)
 
-    def test_old_string_ambiguous_with_replace_all_passes(self):
+    def test_old_string_ambiguous_with_replace_all_passes(self) -> None:
         """Multiple matches with replace_all=True should pass validation."""
         # Should not raise
         self.tool._validate_edit("aaa", "a", "b", True, 0)
 
-    def test_old_string_unique_without_replace_all_passes(self):
+    def test_old_string_unique_without_replace_all_passes(self) -> None:
         """Exactly one match without replace_all should pass validation."""
         # Should not raise
         self.tool._validate_edit("hello world", "hello", "hi", False, 0)
@@ -70,46 +89,46 @@ class TestEditCellSourceValidation:
 class TestEditCellSourceApply:
     """Tests for _apply_edit(): the actual string replacement logic."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         self.tool = EditCellSourceTool()
 
     # --- Basic replacement ---
 
-    def test_single_replacement_happy_path(self):
+    def test_single_replacement_happy_path(self) -> None:
         """Single unique match is replaced correctly."""
         result = self.tool._apply_edit("hello world", "hello", "hi", False)
         assert result == "hi world"
 
-    def test_replace_all_with_multiple_occurrences(self):
+    def test_replace_all_with_multiple_occurrences(self) -> None:
         """replace_all=True replaces every occurrence."""
         result = self.tool._apply_edit("aXbXc", "X", "Y", True)
         assert result == "aYbYc"
 
-    def test_replace_all_with_single_occurrence(self):
+    def test_replace_all_with_single_occurrence(self) -> None:
         """replace_all=True with only one occurrence still works."""
         result = self.tool._apply_edit("hello world", "hello", "hi", True)
         assert result == "hi world"
 
-    def test_old_string_equals_new_string_noop(self):
+    def test_old_string_equals_new_string_noop(self) -> None:
         """old_string == new_string produces identical output (no-op)."""
         source = "unchanged content"
         result = self.tool._apply_edit(source, "unchanged", "unchanged", False)
         assert result == source
 
-    def test_replace_with_empty_string_deletion(self):
+    def test_replace_with_empty_string_deletion(self) -> None:
         """Replacing with empty string deletes the match."""
         result = self.tool._apply_edit("hello world", " world", "", False)
         assert result == "hello"
 
     # --- Multiline ---
 
-    def test_multiline_old_string(self):
+    def test_multiline_old_string(self) -> None:
         """old_string spanning multiple lines is matched and replaced."""
         source = "line1\nline2\nline3"
         result = self.tool._apply_edit(source, "line1\nline2", "replaced", False)
         assert result == "replaced\nline3"
 
-    def test_multiline_new_string_expansion(self):
+    def test_multiline_new_string_expansion(self) -> None:
         """Replacing single line with multiline expands correctly."""
         source = "before\noriginal\nafter"
         result = self.tool._apply_edit(source, "original", "new1\nnew2\nnew3", False)
@@ -117,7 +136,7 @@ class TestEditCellSourceApply:
 
     # --- Special characters ---
 
-    def test_special_characters_quotes_backslashes(self):
+    def test_special_characters_quotes_backslashes(self) -> None:
         """Quotes and backslashes are treated as literal characters."""
         source = 'path = "C:\\\\Users\\\\test"'
         old = '"C:\\\\Users\\\\test"'
@@ -125,7 +144,7 @@ class TestEditCellSourceApply:
         result = self.tool._apply_edit(source, old, new, False)
         assert result == 'path = "D:\\\\Data\\\\output"'
 
-    def test_regex_metacharacters_literal_match(self):
+    def test_regex_metacharacters_literal_match(self) -> None:
         """Regex metacharacters (.*+?[]{}|^$) are matched literally, not as regex."""
         source = "value = data[0] + (x * y)"
         old = "[0] + (x * y)"
@@ -135,13 +154,13 @@ class TestEditCellSourceApply:
 
     # --- Unicode ---
 
-    def test_unicode_content(self):
+    def test_unicode_content(self) -> None:
         """Unicode strings (accents, emoji, etc.) are handled correctly."""
         source = "café résumé naïve"
         result = self.tool._apply_edit(source, "résumé", "resume", False)
         assert result == "café resume naïve"
 
-    def test_cjk_characters(self):
+    def test_cjk_characters(self) -> None:
         """CJK characters are matched and replaced correctly."""
         source = "日本語テスト"
         result = self.tool._apply_edit(source, "テスト", "試験", False)
@@ -149,19 +168,19 @@ class TestEditCellSourceApply:
 
     # --- Whitespace sensitivity ---
 
-    def test_tab_sensitive_matching(self):
+    def test_tab_sensitive_matching(self) -> None:
         """Tabs are distinct from spaces — tab-based old_string must match exactly."""
         source = "\tindented line"
         result = self.tool._apply_edit(source, "\tindented", "\t\tdouble_indented", False)
         assert result == "\t\tdouble_indented line"
 
-    def test_trailing_space_sensitivity(self):
+    def test_trailing_space_sensitivity(self) -> None:
         """Trailing spaces are significant and must match exactly."""
         source = "word   "  # three trailing spaces
         result = self.tool._apply_edit(source, "word   ", "word", False)
         assert result == "word"
 
-    def test_indentation_sensitivity_wrong_indent_not_found(self):
+    def test_indentation_sensitivity_wrong_indent_not_found(self) -> None:
         """Wrong indentation should not match — spaces matter."""
         source = "    four_spaces"
         with pytest.raises(ToolError, match="not found"):
@@ -169,24 +188,24 @@ class TestEditCellSourceApply:
 
     # --- Boundary positions ---
 
-    def test_old_string_at_beginning_of_source(self):
+    def test_old_string_at_beginning_of_source(self) -> None:
         """Match at the very start of the source string."""
         result = self.tool._apply_edit("START rest of text", "START", "BEGIN", False)
         assert result == "BEGIN rest of text"
 
-    def test_old_string_at_end_of_source(self):
+    def test_old_string_at_end_of_source(self) -> None:
         """Match at the very end of the source string."""
         result = self.tool._apply_edit("rest of text END", "END", "FINISH", False)
         assert result == "rest of text FINISH"
 
-    def test_old_string_is_entire_source(self):
+    def test_old_string_is_entire_source(self) -> None:
         """old_string matches the entire source — full replacement."""
         result = self.tool._apply_edit("entire content", "entire content", "new content", False)
         assert result == "new content"
 
     # --- Edge cases ---
 
-    def test_very_long_source(self):
+    def test_very_long_source(self) -> None:
         """Handles large sources (10K+ lines) without issues."""
         lines = [f"line {i}: some content here" for i in range(10_001)]
         source = "\n".join(lines)
@@ -199,7 +218,7 @@ class TestEditCellSourceApply:
         assert "line 4999: some content here" in result
         assert "line 5001: some content here" in result
 
-    def test_overlapping_patterns_with_replace_all(self):
+    def test_overlapping_patterns_with_replace_all(self) -> None:
         """replace_all with patterns that could overlap uses non-overlapping replacement."""
         # Python str.replace is non-overlapping left-to-right, so "aaa" with "a"->"ab"
         # gives "ababab", not infinite
@@ -212,9 +231,9 @@ class TestEditCellSourceApply:
 ###############################################################################
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
-async def test_edit_cell_source_basic_code_cell(mcp_client_parametrized: MCPClient):
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
+async def test_edit_cell_source_basic_code_cell(mcp_client_parametrized: MCPClient) -> None:
     """Edit a code cell and verify diff is returned."""
     async with mcp_client_parametrized:
         # Insert a code cell
@@ -229,9 +248,9 @@ async def test_edit_cell_source_basic_code_cell(mcp_client_parametrized: MCPClie
         await mcp_client_parametrized.delete_cell([1])
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
-async def test_edit_cell_source_basic_markdown_cell(mcp_client_parametrized: MCPClient):
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
+async def test_edit_cell_source_basic_markdown_cell(mcp_client_parametrized: MCPClient) -> None:
     """Edit a markdown cell and verify diff is returned."""
     async with mcp_client_parametrized:
         await mcp_client_parametrized.insert_cell(1, "markdown", "# Title\nSome **bold** text")
@@ -243,9 +262,9 @@ async def test_edit_cell_source_basic_markdown_cell(mcp_client_parametrized: MCP
         await mcp_client_parametrized.delete_cell([1])
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
-async def test_edit_cell_source_then_read_verifies_change(mcp_client_parametrized: MCPClient):
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
+async def test_edit_cell_source_then_read_verifies_change(mcp_client_parametrized: MCPClient) -> None:
     """Edit a cell, then read it back to confirm the change persisted."""
     async with mcp_client_parametrized:
         original = "alpha = 1\nbeta = 2"
@@ -262,9 +281,9 @@ async def test_edit_cell_source_then_read_verifies_change(mcp_client_parametrize
         await mcp_client_parametrized.delete_cell([1])
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
-async def test_edit_cell_source_then_execute(mcp_client_parametrized: MCPClient):
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
+async def test_edit_cell_source_then_execute(mcp_client_parametrized: MCPClient) -> None:
     """Edit a code cell, execute it, and verify the output reflects the change."""
     async with mcp_client_parametrized:
         await mcp_client_parametrized.insert_cell(1, "code", "print('before')")
@@ -279,9 +298,9 @@ async def test_edit_cell_source_then_execute(mcp_client_parametrized: MCPClient)
         await mcp_client_parametrized.delete_cell([1])
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
-async def test_edit_cell_source_replace_all(mcp_client_parametrized: MCPClient):
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
+async def test_edit_cell_source_replace_all(mcp_client_parametrized: MCPClient) -> None:
     """replace_all=True replaces all occurrences in the cell."""
     async with mcp_client_parametrized:
         await mcp_client_parametrized.insert_cell(1, "code", "a = 1\na = 2\na = 3")
@@ -298,33 +317,31 @@ async def test_edit_cell_source_replace_all(mcp_client_parametrized: MCPClient):
         await mcp_client_parametrized.delete_cell([1])
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
-async def test_edit_cell_source_error_cell_index_out_of_range(mcp_client_parametrized: MCPClient):
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
+async def test_edit_cell_source_error_cell_index_out_of_range(mcp_client_parametrized: MCPClient) -> None:
     """Out-of-range cell_index should return None (error)."""
     async with mcp_client_parametrized:
         result = await mcp_client_parametrized.edit_cell_source(9999, "x", "y")
         assert result is None
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
-async def test_edit_cell_source_error_old_string_not_found(mcp_client_parametrized: MCPClient):
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
+async def test_edit_cell_source_error_old_string_not_found(mcp_client_parametrized: MCPClient) -> None:
     """old_string not present in cell source should return None (error)."""
     async with mcp_client_parametrized:
         await mcp_client_parametrized.insert_cell(1, "code", "x = 1")
 
-        result = await mcp_client_parametrized.edit_cell_source(
-            1, "nonexistent_string", "replacement"
-        )
+        result = await mcp_client_parametrized.edit_cell_source(1, "nonexistent_string", "replacement")
         assert result is None
 
         await mcp_client_parametrized.delete_cell([1])
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
-async def test_edit_cell_source_error_ambiguous_match(mcp_client_parametrized: MCPClient):
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
+async def test_edit_cell_source_error_ambiguous_match(mcp_client_parametrized: MCPClient) -> None:
     """Ambiguous match (multiple occurrences without replace_all) should return None (error)."""
     async with mcp_client_parametrized:
         await mcp_client_parametrized.insert_cell(1, "code", "x = 1\nx = 2\nx = 3")
@@ -335,11 +352,11 @@ async def test_edit_cell_source_error_ambiguous_match(mcp_client_parametrized: M
         await mcp_client_parametrized.delete_cell([1])
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
 async def test_edit_cell_source_preserves_cell_type_and_metadata(
     mcp_client_parametrized: MCPClient,
-):
+) -> None:
     """Editing a cell should not change its type."""
     async with mcp_client_parametrized:
         await mcp_client_parametrized.insert_cell(1, "markdown", "# Hello World")
@@ -355,9 +372,9 @@ async def test_edit_cell_source_preserves_cell_type_and_metadata(
         await mcp_client_parametrized.delete_cell([1])
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
-async def test_edit_cell_source_sequential_edits_on_same_cell(mcp_client_parametrized: MCPClient):
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
+async def test_edit_cell_source_sequential_edits_on_same_cell(mcp_client_parametrized: MCPClient) -> None:
     """Three sequential edits on the same cell — verify final state."""
     async with mcp_client_parametrized:
         await mcp_client_parametrized.insert_cell(1, "code", "step = 0")
@@ -373,16 +390,14 @@ async def test_edit_cell_source_sequential_edits_on_same_cell(mcp_client_paramet
         await mcp_client_parametrized.delete_cell([1])
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
-async def test_edit_cell_source_after_insert_workflow(mcp_client_parametrized: MCPClient):
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
+async def test_edit_cell_source_after_insert_workflow(mcp_client_parametrized: MCPClient) -> None:
     """Insert a cell, then edit it — standard workflow."""
     async with mcp_client_parametrized:
         await mcp_client_parametrized.insert_cell(1, "code", "placeholder = True")
 
-        result = await mcp_client_parametrized.edit_cell_source(
-            1, "placeholder = True", "real_code = 42"
-        )
+        result = await mcp_client_parametrized.edit_cell_source(1, "placeholder = True", "real_code = 42")
         assert result is not None
 
         cell_info = await mcp_client_parametrized.read_cell(1)
@@ -392,17 +407,15 @@ async def test_edit_cell_source_after_insert_workflow(mcp_client_parametrized: M
         await mcp_client_parametrized.delete_cell([1])
 
 
-@pytest.mark.asyncio
-@timeout_wrapper(60)
-async def test_edit_cell_source_noop_same_old_and_new(mcp_client_parametrized: MCPClient):
+@_asyncio_mark
+@_typed_timeout_wrapper(60)
+async def test_edit_cell_source_noop_same_old_and_new(mcp_client_parametrized: MCPClient) -> None:
     """old_string == new_string is a no-op — cell should remain unchanged."""
     async with mcp_client_parametrized:
         source = "unchanged = True"
         await mcp_client_parametrized.insert_cell(1, "code", source)
 
-        result = await mcp_client_parametrized.edit_cell_source(
-            1, "unchanged = True", "unchanged = True"
-        )
+        result = await mcp_client_parametrized.edit_cell_source(1, "unchanged = True", "unchanged = True")
         assert result is not None
 
         cell_info = await mcp_client_parametrized.read_cell(1)

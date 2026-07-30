@@ -21,6 +21,7 @@ import asyncio
 import importlib
 import keyword
 import logging
+import math
 import os
 import re
 import time
@@ -60,6 +61,7 @@ from jupyter_mcp_server.tools import (
     OverwriteCellSourceTool,
     ReadCellTool,
     ReadNotebookTool,
+    ToolError,
     UnuseNotebookTool,
 )
 from jupyter_mcp_server.utils import (
@@ -185,6 +187,11 @@ def _error_json(request: Request, exc: BaseException, status_code: int) -> JSONR
             request_id=current_request_id(),
         ).model_dump(),
     )
+
+
+def _tool_error_http_exception(exc: ToolError) -> HTTPException:
+    """Preserve tool-layer boundary status before generic ValueError handling."""
+    return HTTPException(status_code=_boundary_status(exc) or exc.status_code or 400, detail=str(exc))
 
 
 @app.middleware("http")
@@ -896,14 +903,18 @@ async def _wait_for_session_kernel_ready(
 
     def _probe_kernel_channels() -> None:
         deadline = time.monotonic() + KERNEL_READY_TIMEOUT_SECONDS
+
+        def _remaining_seconds() -> int:
+            return max(1, math.ceil(deadline - time.monotonic()))
+
         kernel = KernelClient(
             server_url=base_url,
             token=get_config().runtime_token,
             kernel_id=kernel_id,
         )
         try:
-            kernel.start(timeout=max(0.1, deadline - time.monotonic()))
-            kernel._manager.client.wait_for_ready(timeout=max(0.1, deadline - time.monotonic()))
+            kernel.start(timeout=_remaining_seconds())
+            kernel._manager.client.wait_for_ready(timeout=_remaining_seconds())
         finally:
             kernel.stop(shutdown_kernel=False)
 
@@ -1253,6 +1264,8 @@ async def use_notebook(request: UseNotebookRequest) -> dict[str, Any]:
     """
     try:
         notebook_id = encode_notebook_id(request.notebook_path)
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1327,6 +1340,8 @@ async def read_notebook(
                 )
             ),
         )
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, result=result)
@@ -1341,6 +1356,8 @@ async def get_notebook_status(notebook_id: str) -> dict[str, Any]:
     """Inspect persisted, session, kernel, and RTC state in one request."""
     try:
         path = decode_notebook_id(notebook_id)
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     base_url, headers = _jupyter_connection()
@@ -1480,6 +1497,8 @@ async def read_cell(
                 )
             ),
         )
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, cell_index=cell_index, result=result)
@@ -1513,6 +1532,8 @@ async def insert_cell(
                 )
             ),
         )
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, cell_index=request.cell_index, result=result)
@@ -1541,6 +1562,8 @@ async def overwrite_cell_source(
                 )
             ),
         )
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, cell_index=cell_index, result=result)
@@ -1571,6 +1594,8 @@ async def edit_cell_source(
                 )
             ),
         )
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, cell_index=cell_index, result=result)
@@ -1598,6 +1623,8 @@ async def delete_cell(
                 )
             ),
         )
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, deleted_indices=request.cell_indices, result=result)
@@ -1625,6 +1652,8 @@ async def move_cell(
                 )
             ),
         )
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(
@@ -1653,6 +1682,8 @@ async def clear_cell_output(
             notebook_id,
             lambda: ClearCellOutputTool().execute(**_ctx(cell_index=cell_index)),
         )
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, cell_index=cell_index, result=result)
@@ -1692,6 +1723,8 @@ async def execute_cell(
             cell_index=cell_index,
             handoff_after_seconds=request.handoff_after_seconds,
         )
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, **state)
@@ -1745,6 +1778,8 @@ async def insert_execute_code_cell(
             cell_index=request.cell_index,
             handoff_after_seconds=request.handoff_after_seconds,
         )
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, **state)
@@ -1777,6 +1812,8 @@ async def execute_code(
             cell_index=None,
             handoff_after_seconds=request.handoff_after_seconds,
         )
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _envelope(notebook_id, path, **state)
@@ -1847,6 +1884,8 @@ async def restart_notebook(
             else:
                 runtime.notebooks.remove_notebook(notebook_id)
             await runtime.activate(notebook_id, kernel_id=kernel_id)
+    except ToolError as exc:
+        raise _tool_error_http_exception(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     recovery_note = " after its previous heartbeat stopped responding" if recovering_unresponsive else ""

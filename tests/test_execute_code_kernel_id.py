@@ -9,21 +9,28 @@ what is under test is which kernel the code actually reaches.
 """
 
 import time
+from collections.abc import Generator
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from jupyter_kernel_client import KernelClient
-from jupyter_server_client import JupyterServerClient
+
+if TYPE_CHECKING:
+    KernelClient = Any
+    JupyterServerClient = Any
+else:
+    from jupyter_kernel_client import KernelClient
+    from jupyter_server_client import JupyterServerClient
 
 from jupyter_mcp_server.config import reset_config, set_config
 from jupyter_mcp_server.notebook_manager import NotebookManager
-from jupyter_mcp_server.tools._base import ServerMode
+from jupyter_mcp_server.tools._base import ServerMode, ToolError
 from jupyter_mcp_server.tools.execute_code_tool import ExecuteCodeTool
 from jupyter_mcp_server.utils import safe_extract_outputs, wait_for_kernel_idle
 
 from .conftest import JUPYTER_TOKEN
 
 
-def _seed(server_client, kernel, marker, timeout=60):
+def _seed(server_client: JupyterServerClient, kernel: KernelClient, marker: str, timeout: int = 60) -> None:
     """Wait for a kernel to be ready, then give it its identity.
 
     A kernel is created asynchronously, so ``start()`` returns while the server may
@@ -43,7 +50,9 @@ def _seed(server_client, kernel, marker, timeout=60):
 
 
 @pytest.fixture
-def targeting_setup(jupyter_server):
+def targeting_setup(
+    jupyter_server: str,
+) -> Generator[tuple[NotebookManager, JupyterServerClient, str]]:
     """Two live kernels, each holding a distinct MARKER, with the first bound to
     the current notebook. Yields (notebook_manager, server_client, raw_kernel_id).
     """
@@ -77,37 +86,47 @@ def targeting_setup(jupyter_server):
         reset_config()
 
 
-async def _execute(notebook_manager, server_client, code, kernel_id=None):
-    def _no_kernel_expected():
+async def _execute(
+    notebook_manager: NotebookManager,
+    server_client: JupyterServerClient,
+    code: str,
+    kernel_id: str | None = None,
+) -> list[str | Any]:
+    def _no_kernel_expected() -> None:
         raise AssertionError("the current notebook already has a kernel")
 
-    return await ExecuteCodeTool().execute(
-        mode=ServerMode.MCP_SERVER,
-        server_client=server_client,
-        notebook_manager=notebook_manager,
-        code=code,
-        timeout=30,
-        kernel_id=kernel_id,
-        ensure_kernel_alive_fn=_no_kernel_expected,
-        wait_for_kernel_idle_fn=wait_for_kernel_idle,
-        safe_extract_outputs_fn=safe_extract_outputs,
-    )
+    kwargs: dict[str, Any] = {
+        "mode": ServerMode.MCP_SERVER,
+        "server_client": server_client,
+        "notebook_manager": notebook_manager,
+        "code": code,
+        "timeout": 30,
+        "ensure_kernel_alive_fn": _no_kernel_expected,
+        "wait_for_kernel_idle_fn": wait_for_kernel_idle,
+        "safe_extract_outputs_fn": safe_extract_outputs,
+    }
+    if kernel_id is not None:
+        kwargs["kernel_id"] = kernel_id
+
+    return await ExecuteCodeTool().execute(**kwargs)
 
 
 @pytest.mark.asyncio
-async def test_execute_code_runs_in_the_requested_kernel(targeting_setup):
+async def test_execute_code_runs_in_the_requested_kernel(
+    targeting_setup: tuple[NotebookManager, JupyterServerClient, str],
+) -> None:
     """kernel_id must select the kernel the code runs in, not be discarded."""
     notebook_manager, server_client, raw_kernel_id = targeting_setup
 
-    outputs = await _execute(
-        notebook_manager, server_client, "print(MARKER)", kernel_id=raw_kernel_id
-    )
+    outputs = await _execute(notebook_manager, server_client, "print(MARKER)", kernel_id=raw_kernel_id)
 
     assert "raw-kernel" in "".join(str(output) for output in outputs)
 
 
 @pytest.mark.asyncio
-async def test_execute_code_leaves_the_targeted_kernel_running(targeting_setup):
+async def test_execute_code_leaves_the_targeted_kernel_running(
+    targeting_setup: tuple[NotebookManager, JupyterServerClient, str],
+) -> None:
     """The targeted kernel is borrowed, so it must survive the call and keep its
     state: releasing the connection must not shut a kernel down."""
     notebook_manager, server_client, raw_kernel_id = targeting_setup
@@ -116,14 +135,14 @@ async def test_execute_code_leaves_the_targeted_kernel_running(targeting_setup):
 
     assert any(kernel.id == raw_kernel_id for kernel in server_client.kernels.list_kernels())
 
-    outputs = await _execute(
-        notebook_manager, server_client, "print(MARKER)", kernel_id=raw_kernel_id
-    )
+    outputs = await _execute(notebook_manager, server_client, "print(MARKER)", kernel_id=raw_kernel_id)
     assert "raw-kernel" in "".join(str(output) for output in outputs)
 
 
 @pytest.mark.asyncio
-async def test_execute_code_without_kernel_id_uses_the_current_notebook(targeting_setup):
+async def test_execute_code_without_kernel_id_uses_the_current_notebook(
+    targeting_setup: tuple[NotebookManager, JupyterServerClient, str],
+) -> None:
     """Omitting kernel_id keeps the documented default: the current notebook's kernel."""
     notebook_manager, server_client, _ = targeting_setup
 
@@ -133,15 +152,16 @@ async def test_execute_code_without_kernel_id_uses_the_current_notebook(targetin
 
 
 @pytest.mark.asyncio
-async def test_execute_code_reports_an_unknown_kernel_id(targeting_setup):
+async def test_execute_code_reports_an_unknown_kernel_id(
+    targeting_setup: tuple[NotebookManager, JupyterServerClient, str],
+) -> None:
     """An unknown kernel_id must be reported, never silently redirected to
     whichever kernel happens to be current."""
     notebook_manager, server_client, _ = targeting_setup
 
-    outputs = await _execute(
-        notebook_manager, server_client, "print(MARKER)", kernel_id="no-such-kernel"
-    )
+    with pytest.raises(ToolError) as exc_info:
+        await _execute(notebook_manager, server_client, "print(MARKER)", kernel_id="no-such-kernel")
 
-    joined = "".join(str(output) for output in outputs)
+    joined = str(exc_info.value)
     assert "no-such-kernel" in joined and "not found" in joined
     assert "current-notebook-kernel" not in joined

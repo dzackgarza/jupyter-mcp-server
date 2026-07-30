@@ -121,6 +121,7 @@ dmypy.json
 !.devcontainer
 
 untracked_notebooks/*
+dev/content/test-*.ipynb
 .jupyter_ystore
 .jupyter_ystore.db
 docs/.yarn/*

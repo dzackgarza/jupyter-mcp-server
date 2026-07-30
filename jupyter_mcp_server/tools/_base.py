@@ -5,21 +5,25 @@
 """Base classes, enums, and error infrastructure for MCP tools."""
 
 from abc import ABC, abstractmethod
-from enum import Enum
-from typing import Any
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any
 
-from jupyter_kernel_client import KernelClient
-from jupyter_server_client import JupyterServerClient
+if TYPE_CHECKING:
+    KernelClient = Any
+    JupyterServerClient = Any
+else:
+    from jupyter_kernel_client import KernelClient
+    from jupyter_server_client import JupyterServerClient
 
 
-class ServerMode(str, Enum):
+class ServerMode(StrEnum):
     """Enum to indicate which server mode the tool is running in."""
 
     MCP_SERVER = "mcp_server"
     JUPYTER_SERVER = "jupyter_server"
 
 
-class ToolError(Exception):
+class ToolError(ValueError):
     """Raised by tool implementations to signal a failure to the MCP client.
 
     FastMCP catches any exception from a tool function and returns it as an
@@ -107,7 +111,7 @@ class BaseTool(ABC):
     (using direct API access to serverapp managers).
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the tool."""
         pass
 
@@ -120,7 +124,7 @@ class BaseTool(ABC):
         contents_manager: Any | None = None,
         kernel_manager: Any | None = None,
         kernel_spec_manager: Any | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> Any:
         """Execute the tool logic.
 

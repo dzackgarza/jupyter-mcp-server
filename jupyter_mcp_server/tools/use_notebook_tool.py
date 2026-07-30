@@ -5,18 +5,26 @@
 """Use notebook tool implementation."""
 
 import asyncio
+import importlib
 import logging
+import math
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from jupyter_core.utils import ensure_async
-from jupyter_kernel_client import KernelClient
-from jupyter_server_client import JupyterServerClient, NotFoundError
 
 from jupyter_mcp_server.models import Notebook
 from jupyter_mcp_server.notebook_manager import NotebookManager
 from jupyter_mcp_server.tools._base import BaseTool, ServerMode, ToolError, format_tool_error
+
+if TYPE_CHECKING:
+    KernelClient = Any
+    JupyterServerClient = Any
+    NotFoundError = Exception
+else:
+    from jupyter_kernel_client import KernelClient
+    from jupyter_server_client import JupyterServerClient, NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +37,7 @@ _KERNEL_START_TIMEOUT_SECONDS = 30
 class UseNotebookTool(BaseTool):
     """Tool to use (connect to or create) a notebook file."""
 
-    async def _start_kernel_local(self, kernel_manager: Any, path: str | None = None):
+    async def _start_kernel_local(self, kernel_manager: Any, path: str | None = None) -> dict[str, str]:
         # Start a new kernel using local API
         kernel_id = await kernel_manager.start_kernel()
         logger.info(f"Started kernel '{kernel_id}', waiting for it to be ready...")
@@ -40,7 +48,7 @@ class UseNotebookTool(BaseTool):
 
         max_wait_time = 30  # seconds
         wait_interval = 0.5  # seconds
-        elapsed = 0
+        elapsed = 0.0
         kernel_ready = False
 
         while elapsed < max_wait_time:
@@ -55,9 +63,9 @@ class UseNotebookTool(BaseTool):
                         kernel_ready = True
                         logger.info(f"Kernel '{kernel_id}' is ready (took {elapsed:.1f}s)")
                         break
-                    except:
+                    except Exception as exc:
                         # Connection info not available yet, kernel still starting
-                        pass
+                        logger.debug("Waiting for kernel connection info: %s", exc)
             except Exception as e:
                 logger.debug(f"Waiting for kernel to start: {e}")
 
@@ -65,9 +73,7 @@ class UseNotebookTool(BaseTool):
             elapsed += wait_interval
 
         if not kernel_ready:
-            logger.warning(
-                f"Kernel '{kernel_id}' may not be fully ready after {max_wait_time}s wait"
-            )
+            logger.warning(f"Kernel '{kernel_id}' may not be fully ready after {max_wait_time}s wait")
 
         return {"id": kernel_id}
 
@@ -90,12 +96,13 @@ class UseNotebookTool(BaseTool):
         if mode == ServerMode.JUPYTER_SERVER and contents_manager is not None:
             return bool(contents_manager.exists(notebook_path))
 
+        if server_client is None:
+            raise ToolError("[use_notebook] Cannot check notebook existence without a Jupyter server client.")
+
         listing = server_client.contents.list_directory(parent)
         return path.name in [entry.name for entry in listing]
 
-    async def _check_path_http(
-        self, server_client: JupyterServerClient, notebook_path: str, mode: str
-    ) -> None:
+    async def _check_path_http(self, server_client: JupyterServerClient, notebook_path: str, mode: str) -> None:
         """Verify notebook path exists (HTTP mode). Raises ToolError on failure."""
         path = Path(notebook_path)
         try:
@@ -133,9 +140,7 @@ class UseNotebookTool(BaseTool):
         except ToolError:
             raise  # Already enriched
         except NotFoundError as e:
-            parent_dir = (
-                path.parent.as_posix() if path.parent.as_posix() != "." else "root directory"
-            )
+            parent_dir = path.parent.as_posix() if path.parent.as_posix() != "." else "root directory"
             raise ToolError(
                 format_tool_error(
                     "use_notebook",
@@ -162,18 +167,14 @@ class UseNotebookTool(BaseTool):
                 )
             ) from e
 
-    async def _check_path_local(
-        self, contents_manager: Any, notebook_path: str, mode: str
-    ) -> None:
+    async def _check_path_local(self, contents_manager: Any, notebook_path: str, mode: str) -> None:
         """Verify notebook path exists (local mode). Raises ToolError on failure."""
         path = Path(notebook_path)
         try:
             parent_path = str(path.parent) if str(path.parent) != "." else ""
 
             # Get directory contents using local API
-            model = await ensure_async(
-                contents_manager.get(parent_path, content=True, type="directory")
-            )
+            model = await ensure_async(contents_manager.get(parent_path, content=True, type="directory"))
 
             if mode == "connect":
                 available_names = [item["name"] for item in model.get("content", [])]
@@ -226,13 +227,13 @@ class UseNotebookTool(BaseTool):
         session_manager: Any | None = None,
         notebook_manager: NotebookManager | None = None,
         # Tool-specific parameters
-        notebook_name: str = None,
-        notebook_path: str = None,
+        notebook_name: str | None = None,
+        notebook_path: str | None = None,
         use_mode: Literal["connect", "create"] = "connect",
         kernel_id: str | None = None,
         runtime_url: str | None = None,
         runtime_token: str | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> str:
         """Execute the use_notebook tool.
 
@@ -254,6 +255,13 @@ class UseNotebookTool(BaseTool):
         Returns:
             Success message with notebook information
         """
+        if notebook_manager is None:
+            raise ToolError("[use_notebook] Missing notebook manager.")
+        if notebook_name is None:
+            raise ToolError("[use_notebook] Missing notebook name.")
+        if notebook_path is None:
+            raise ToolError("[use_notebook] Missing notebook path.")
+
         # Check server connectivity (HTTP mode only)
         if mode == ServerMode.MCP_SERVER and server_client is not None:
             try:
@@ -299,14 +307,9 @@ class UseNotebookTool(BaseTool):
             use_mode == "create"
             and notebook_name in notebook_manager
             and notebook_manager.get_notebook_path(notebook_name) == notebook_path
-            and not self._notebook_file_exists(
-                mode, server_client, contents_manager, notebook_path
-            )
+            and not self._notebook_file_exists(mode, server_client, contents_manager, notebook_path)
         ):
-            info_list.append(
-                f"[INFO] Recreating notebook '{notebook_name}': its file is no "
-                f"longer present at '{notebook_path}'."
-            )
+            info_list.append(f"[INFO] Recreating notebook '{notebook_name}': its file is no longer present at '{notebook_path}'.")
             notebook_manager.remove_notebook(notebook_name)
 
         # Check if notebook already in notebook_manager (Cober all cases)
@@ -322,12 +325,11 @@ class UseNotebookTool(BaseTool):
                         return f"Notebook '{notebook_name}' is already activated now. DO NOT REACTIVATE AGAIN."
                     else:
                         # the only correct case.
-                        info_list.append(
-                            f"[INFO] Reactivating notebook '{notebook_name}' and deactivating '{notebook_manager.get_current_notebook()}'."
-                        )
+                        info_list.append(f"[INFO] Reactivating notebook '{notebook_name}' and deactivating '{notebook_manager.get_current_notebook()}'.")
                         notebook_manager.set_current_notebook(notebook_name)
                 else:
-                    return f"The path '{notebook_path}' is not the correct path for notebook '{notebook_name}'. Do you mean connect to '{notebook_manager.get_notebook_path(notebook_name)}'?"
+                    expected_path = notebook_manager.get_notebook_path(notebook_name)
+                    return f"The path '{notebook_path}' is not the correct path for notebook '{notebook_name}'. Do you mean connect to '{expected_path}'?"
         # add new notebook to notebook_manager
         else:
             # Create notebook if needed
@@ -366,11 +368,11 @@ class UseNotebookTool(BaseTool):
                     kernel_exists = any(kernel.id == kernel_id for kernel in kernels)
                     if not kernel_exists:
                         raise ToolError(
-                        f"[use_notebook] Kernel '{kernel_id}' not found on the Jupyter server.\n"
-                        f"  Suggestions:\n"
-                        f"    - Use list_kernels to see available kernel IDs.\n"
-                        f"    - Omit kernel_id to start a new kernel automatically."
-                    )
+                            f"[use_notebook] Kernel '{kernel_id}' not found on the Jupyter server.\n"
+                            f"  Suggestions:\n"
+                            f"    - Use list_kernels to see available kernel IDs.\n"
+                            f"    - Omit kernel_id to start a new kernel automatically."
+                        )
                 kernel = KernelClient(
                     server_url=runtime_url,
                     token=runtime_token,
@@ -380,13 +382,15 @@ class UseNotebookTool(BaseTool):
 
                 def _start_and_probe() -> None:
                     deadline = time.monotonic() + _KERNEL_START_TIMEOUT_SECONDS
+
+                    def _remaining_seconds() -> int:
+                        return max(1, math.ceil(deadline - time.monotonic()))
+
                     kernel.start(
                         path=notebook_path,
-                        timeout=max(0.1, deadline - time.monotonic()),
+                        timeout=_remaining_seconds(),
                     )
-                    kernel._manager.client.wait_for_ready(
-                        timeout=max(0.1, deadline - time.monotonic())
-                    )
+                    kernel._manager.client.wait_for_ready(timeout=_remaining_seconds())
 
                 try:
                     await asyncio.to_thread(_start_and_probe)
@@ -425,11 +429,11 @@ class UseNotebookTool(BaseTool):
                     # Connect to existing kernel - verify it exists
                     if kernel_id not in kernel_manager:
                         raise ToolError(
-                        f"[use_notebook] Kernel '{kernel_id}' not found in local kernel manager.\n"
-                        f"  Suggestions:\n"
-                        f"    - Use list_kernels to see available kernel IDs.\n"
-                        f"    - Omit kernel_id to start a new kernel automatically."
-                    )
+                            f"[use_notebook] Kernel '{kernel_id}' not found in local kernel manager.\n"
+                            f"  Suggestions:\n"
+                            f"    - Use list_kernels to see available kernel IDs.\n"
+                            f"    - Omit kernel_id to start a new kernel automatically."
+                        )
                     kernel = {"id": kernel_id}
                 else:
                     kernel = await self._start_kernel_local(kernel_manager, path=notebook_path)
@@ -447,17 +451,11 @@ class UseNotebookTool(BaseTool):
                             type="notebook",
                             name=notebook_path,
                         )
-                        logger.info(
-                            f"Created Jupyter session '{session_dict.get('id')}' for notebook '{notebook_path}' with kernel '{kernel_id}'"
-                        )
+                        logger.info(f"Created Jupyter session '{session_dict.get('id')}' for notebook '{notebook_path}' with kernel '{kernel_id}'")
                     except Exception as e:
-                        logger.warning(
-                            f"Failed to create Jupyter session: {e}. Notebook may not be properly connected in JupyterLab UI."
-                        )
+                        logger.warning(f"Failed to create Jupyter session: {e}. Notebook may not be properly connected in JupyterLab UI.")
                 else:
-                    logger.warning(
-                        "No session_manager available. Notebook may not be properly connected in JupyterLab UI."
-                    )
+                    logger.warning("No session_manager available. Notebook may not be properly connected in JupyterLab UI.")
 
             # Add notebook to notebook_manager
             if mode == ServerMode.MCP_SERVER and runtime_url:
@@ -469,9 +467,7 @@ class UseNotebookTool(BaseTool):
                     path=notebook_path,
                 )
             elif mode == ServerMode.JUPYTER_SERVER and kernel_manager is not None:
-                notebook_manager.add_notebook(
-                    notebook_name, kernel, server_url="local", token=None, path=notebook_path
-                )
+                notebook_manager.add_notebook(notebook_name, kernel, server_url="local", token=None, path=notebook_path)
             else:
                 raise ToolError(
                     f"[use_notebook] Cannot register notebook: invalid configuration.\n"
@@ -489,13 +485,11 @@ class UseNotebookTool(BaseTool):
         try:
             if mode == ServerMode.JUPYTER_SERVER and contents_manager is not None:
                 # Read notebook to get cell count and first 20 cells
-                model = await ensure_async(
-                    contents_manager.get(notebook_path, content=True, type="notebook")
-                )
+                model = await ensure_async(contents_manager.get(notebook_path, content=True, type="notebook"))
                 if "content" in model:
                     notebook = Notebook(**model["content"])
                 else:
-                    notebook = Notebook()
+                    notebook = Notebook(cells=[], metadata={}, nbformat=4, nbformat_minor=5)
 
             elif mode == ServerMode.MCP_SERVER and notebook_manager is not None:
                 # Use notebook manager to get cell info
@@ -504,9 +498,7 @@ class UseNotebookTool(BaseTool):
 
             info_list.append(f"\nNotebook has {len(notebook)} cells.")
             info_list.append(f"Showing first {min(20, len(notebook))} cells:\n")
-            info_list.append(
-                notebook.format_output(response_format="brief", start_index=0, limit=20)
-            )
+            info_list.append(notebook.format_output(response_format="brief", start_index=0, limit=20))
         except Exception as e:
             logger.debug(f"Failed to get notebook summary: {e}")
 
@@ -519,9 +511,7 @@ class UseNotebookTool(BaseTool):
             context = get_server_context()
 
             if context.is_jupyterlab_mode() and get_config().open_notebook_in_ui:
-                logger.info(
-                    f"JupyterLab mode enabled, attempting to open notebook '{notebook_path}' in JupyterLab UI"
-                )
+                logger.info(f"JupyterLab mode enabled, attempting to open notebook '{notebook_path}' in JupyterLab UI")
 
                 # Determine base_url and token based on mode
                 base_url = None
@@ -538,7 +528,13 @@ class UseNotebookTool(BaseTool):
 
                 if base_url and token:
                     try:
-                        from jupyter_mcp_tools.client import MCPToolsClient
+                        MCPToolsClient = cast(
+                            "Any",
+                            getattr(
+                                importlib.import_module("jupyter_mcp_tools.client"),
+                                "MCPToolsClient",
+                            ),
+                        )
 
                         async with MCPToolsClient(base_url=base_url, token=token) as client:
                             execution_result = await client.execute_tool(
@@ -547,24 +543,16 @@ class UseNotebookTool(BaseTool):
                             )
 
                             if execution_result.get("success"):
-                                logger.info(
-                                    f"Successfully opened notebook '{notebook_path}' in JupyterLab UI"
-                                )
+                                logger.info(f"Successfully opened notebook '{notebook_path}' in JupyterLab UI")
                             else:
-                                logger.warning(
-                                    f"Failed to open notebook in JupyterLab UI: {execution_result}"
-                                )
+                                logger.warning(f"Failed to open notebook in JupyterLab UI: {execution_result}")
 
                     except ImportError:
-                        logger.warning(
-                            "jupyter_mcp_tools not available, skipping JupyterLab UI opening"
-                        )
+                        logger.warning("jupyter_mcp_tools not available, skipping JupyterLab UI opening")
                     except Exception as e:
                         logger.warning(f"Failed to open notebook in JupyterLab UI: {e}")
                 else:
-                    logger.warning(
-                        "No valid base_url or token available for opening notebook in JupyterLab UI"
-                    )
+                    logger.warning("No valid base_url or token available for opening notebook in JupyterLab UI")
         except Exception as e:
             logger.debug(f"Could not check JupyterLab mode: {e}")
 

@@ -16,10 +16,13 @@ This module provides:
 
 import logging
 import os
+import re
 import socket
 import subprocess
 import time
+from collections.abc import Generator
 from http import HTTPStatus
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -29,12 +32,37 @@ from requests.exceptions import ConnectionError
 JUPYTER_TOKEN = "MY_TOKEN"
 
 
-def _find_free_port():
+def _test_notebook_path(request: pytest.FixtureRequest) -> str:
+    """Return an ignored per-test notebook path for integration tests."""
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", request.node.nodeid).strip("-")
+    return f"test-{slug[:160]}.ipynb"
+
+
+class _IsolatedMCPClient:
+    """Activate an ignored per-test notebook when a test opens the client."""
+
+    def __init__(self, client: Any, notebook_path: str) -> None:
+        self._client = client
+        self._notebook_path = notebook_path
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    async def __aenter__(self) -> Any:
+        client = await self._client.__aenter__()
+        await client.use_notebook("test_default", self._notebook_path, mode="create")
+        return client
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        return await self._client.__aexit__(exc_type, exc_val, exc_tb)
+
+
+def _find_free_port() -> int:
     """Return an OS-assigned ephemeral port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         s.listen(1)
-        return s.getsockname()[1]
+        return int(s.getsockname()[1])
 
 
 # Test mode configuration - set to False to skip testing specific modes
@@ -46,12 +74,12 @@ def _start_server(
     name: str,
     host: str,
     port: int,
-    command: list,
+    command: list[str],
     readiness_endpoint: str,
-    max_retries: int = 5,
-    extra_env: dict | None = None,
+    max_retries: int = 20,
+    extra_env: dict[str, str] | None = None,
     stderr_file: str | None = None,
-):
+) -> Generator[str]:
     """A Helper that starts a web server as a python subprocess and wait until it's ready to accept connections
 
     This method can be used to start both Jupyter and Jupyter MCP servers
@@ -71,23 +99,51 @@ def _start_server(
 
     # Use DEVNULL to prevent any pipe blocking issues.
     # When stderr_file is set, capture stderr for diagnostics instead.
-    stderr_fh = None
+    stderr_fh = open(stderr_file, "w") if stderr_file else None
     p_serv = subprocess.Popen(
         command,
         stdout=None,
-        stderr=None,
+        stderr=stderr_fh,
         env=env,
     )
     _log_prefix = f"{_log_prefix} [{p_serv.pid}]"
+
+    def _stop_process() -> None:
+        logging.debug(f"{_log_prefix}: stopping ...")
+        try:
+            p_serv.terminate()
+            p_serv.wait(timeout=5)  # Reduced timeout for faster cleanup
+            logging.info(f"{_log_prefix}: stopped")
+        except subprocess.TimeoutExpired:
+            logging.warning(f"{_log_prefix}: terminate timeout, forcing kill")
+            p_serv.kill()
+            try:
+                p_serv.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                logging.error(f"{_log_prefix}: kill timeout, process may be stuck")
+        except Exception as e:
+            logging.error(f"{_log_prefix}: error during shutdown: {e}")
+
+    def _dump_stderr() -> None:
+        if not stderr_fh or not stderr_file:
+            return
+        stderr_fh.close()
+        # Dump captured stderr to the test log for diagnostics
+        try:
+            with open(stderr_file) as f:
+                content = f.read().strip()
+            if content:
+                for line in content.splitlines()[:50]:
+                    logging.info(f"{_log_prefix} stderr: {line}")
+        except Exception:
+            pass
 
     while max_retries > 0:
         # Check if process died
         poll_result = p_serv.poll()
         if poll_result is not None:
             logging.error(f"{_log_prefix}: process died with exit code {poll_result}")
-            pytest.fail(
-                f"{name} failed to start (exit code {poll_result}). Check if port {port} is available."
-            )
+            pytest.fail(f"{name} failed to start (exit code {poll_result}). Check if port {port} is available.")
 
         try:
             response = requests.get(url_readiness, timeout=10)
@@ -95,48 +151,26 @@ def _start_server(
                 logging.info(f"{_log_prefix}: started ({url})!")
                 yield url
                 break
-        except (ConnectionError, requests.exceptions.Timeout):
+        except ConnectionError:
+            logging.debug(f"{_log_prefix}: waiting to accept connections [{max_retries}]")
+            time.sleep(2)
+            max_retries -= 1
+        except requests.exceptions.Timeout:
             logging.debug(f"{_log_prefix}: waiting to accept connections [{max_retries}]")
             time.sleep(2)
             max_retries -= 1
 
     if not max_retries:
-        logging.error(
-            f"{_log_prefix}: fail to start after retries. Check if port {port} is available."
-        )
-        pytest.fail(
-            f"{name} failed to start after max retries. Port {port} may be in use or server crashed."
-        )
-    logging.debug(f"{_log_prefix}: stopping ...")
-    try:
-        p_serv.terminate()
-        p_serv.wait(timeout=5)  # Reduced timeout for faster cleanup
-        logging.info(f"{_log_prefix}: stopped")
-    except subprocess.TimeoutExpired:
-        logging.warning(f"{_log_prefix}: terminate timeout, forcing kill")
-        p_serv.kill()
-        try:
-            p_serv.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            logging.error(f"{_log_prefix}: kill timeout, process may be stuck")
-    except Exception as e:
-        logging.error(f"{_log_prefix}: error during shutdown: {e}")
-    finally:
-        if stderr_fh:
-            stderr_fh.close()
-            # Dump captured stderr to the test log for diagnostics
-            try:
-                with open(stderr_file) as f:
-                    content = f.read().strip()
-                if content:
-                    for line in content.splitlines()[:50]:
-                        logging.info(f"{_log_prefix} stderr: {line}")
-            except Exception:
-                pass
+        logging.error(f"{_log_prefix}: fail to start after retries. Check if port {port} is available.")
+        _stop_process()
+        _dump_stderr()
+        pytest.fail(f"{name} failed to start after max retries. Port {port} may be in use or server crashed.")
+    _stop_process()
+    _dump_stderr()
 
 
 @pytest.fixture(scope="session")
-def jupyter_server():
+def jupyter_server() -> Generator[str]:
     """Start the Jupyter server and returns its URL
 
     This is a session-scoped fixture that starts a single Jupyter Lab instance
@@ -176,7 +210,7 @@ def jupyter_server():
 ###############################################################################
 
 
-def _jupyter_extension_command(host, port, otel_file=""):
+def _jupyter_extension_command(host: str, port: int, otel_file: str = "") -> list[str]:
     """Build the ``jupyter lab`` command with the MCP extension enabled."""
     cmd = [
         "jupyter",
@@ -198,7 +232,7 @@ def _jupyter_extension_command(host, port, otel_file=""):
     return cmd
 
 
-def _mcp_server_command(jupyter_url, port, otel_file=""):
+def _mcp_server_command(jupyter_url: str, port: int, otel_file: str = "") -> list[str]:
     """Build the standalone MCP server command."""
     cmd = [
         "python",
@@ -230,7 +264,7 @@ def _mcp_server_command(jupyter_url, port, otel_file=""):
     return cmd
 
 
-def _get_test_params():
+def _get_test_params() -> list[str]:
     """Generate test parameters based on TEST_MCP_SERVER and TEST_JUPYTER_SERVER flags."""
     params = []
     if TEST_MCP_SERVER:
@@ -242,7 +276,12 @@ def _get_test_params():
     return params
 
 
-def _yield_mcp_url(request, extension_fixture, name_suffix="", otel_file=""):
+def _yield_mcp_url(
+    request: pytest.FixtureRequest,
+    extension_fixture: str,
+    name_suffix: str = "",
+    otel_file: str = "",
+) -> Generator[str]:
     """Shared generator for the parametrized ``mcp_server_url*`` fixtures.
 
     * ``"mcp_server"``      – spins up a standalone MCP server subprocess.
@@ -258,6 +297,7 @@ def _yield_mcp_url(request, extension_fixture, name_suffix="", otel_file=""):
             port=port,
             command=_mcp_server_command(jupyter_server, port, otel_file=otel_file),
             readiness_endpoint="/api/healthz",
+            max_retries=20,
         )
     else:  # jupyter_extension
         yield request.getfixturevalue(extension_fixture)
@@ -269,7 +309,7 @@ def _yield_mcp_url(request, extension_fixture, name_suffix="", otel_file=""):
 
 
 @pytest.fixture(scope="session")
-def jupyter_server_with_extension():
+def jupyter_server_with_extension() -> Generator[str]:
     """Start Jupyter server with MCP extension loaded (JUPYTER_SERVER mode)
 
     This fixture starts Jupyter Lab with the jupyter_mcp_server extension enabled,
@@ -298,7 +338,10 @@ def jupyter_server_with_extension():
 
 
 @pytest.fixture(scope="function")
-def jupyter_mcp_server(request, jupyter_server):
+def jupyter_mcp_server(
+    request: pytest.FixtureRequest,
+    jupyter_server: str,
+) -> Generator[str]:
     """Start the Jupyter MCP server and returns its URL
 
     This fixture starts a standalone MCP server that communicates with Jupyter
@@ -345,11 +388,12 @@ def jupyter_mcp_server(request, jupyter_server):
             str(port),
         ],
         readiness_endpoint="/api/healthz",
+        max_retries=20,
     )
 
 
 @pytest.fixture(scope="function", params=_get_test_params())
-def mcp_server_url(request):
+def mcp_server_url(request: pytest.FixtureRequest) -> Generator[str]:
     """Parametrized fixture that provides both MCP_SERVER and JUPYTER_SERVER mode URLs
 
     This fixture enables testing the same functionality against both deployment modes:
@@ -375,7 +419,7 @@ def mcp_server_url(request):
 
 
 @pytest_asyncio.fixture(scope="function")
-async def mcp_client(jupyter_mcp_server):
+async def mcp_client(jupyter_mcp_server: str) -> Any:
     """An MCP client that can connect to the Jupyter MCP server
 
     This fixture provides an MCPClient instance configured to connect to
@@ -390,7 +434,7 @@ async def mcp_client(jupyter_mcp_server):
 
 
 @pytest.fixture(scope="function")
-def mcp_client_parametrized(mcp_server_url):
+def mcp_client_parametrized(mcp_server_url: str, request: pytest.FixtureRequest) -> Any:
     """MCP client that works with both server modes via parametrization
 
     This fixture creates an MCPClient that can connect to either:
@@ -402,7 +446,10 @@ def mcp_client_parametrized(mcp_server_url):
     """
     from .test_common import MCPClient
 
-    return MCPClient(mcp_server_url, token=JUPYTER_TOKEN)
+    return _IsolatedMCPClient(
+        MCPClient(mcp_server_url, token=JUPYTER_TOKEN),
+        _test_notebook_path(request),
+    )
 
 
 ###############################################################################
@@ -414,13 +461,16 @@ def mcp_client_parametrized(mcp_server_url):
 
 
 @pytest.fixture(scope="session")
-def otel_spans_file(tmp_path_factory):
+def otel_spans_file(tmp_path_factory: pytest.TempPathFactory) -> str:
     """Temp JSONL file for OTel spans – shared by all OTel fixtures."""
     return str(tmp_path_factory.mktemp("otel") / "spans.jsonl")
 
 
 @pytest.fixture(scope="session")
-def jupyter_server_with_extension_otel(otel_spans_file, tmp_path_factory):
+def jupyter_server_with_extension_otel(
+    otel_spans_file: str,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Generator[str]:
     """JupyterLab with MCP extension + OTel (port 8890)."""
     if not TEST_JUPYTER_SERVER:
         pytest.skip("TEST_JUPYTER_SERVER is disabled")
@@ -440,7 +490,10 @@ def jupyter_server_with_extension_otel(otel_spans_file, tmp_path_factory):
 
 
 @pytest.fixture(scope="function", params=_get_test_params())
-def mcp_server_url_otel(request, otel_spans_file):
+def mcp_server_url_otel(
+    request: pytest.FixtureRequest,
+    otel_spans_file: str,
+) -> Generator[str]:
     """Parametrized MCP URL – both modes, with OTel enabled."""
     yield from _yield_mcp_url(
         request,
@@ -451,7 +504,7 @@ def mcp_server_url_otel(request, otel_spans_file):
 
 
 @pytest.fixture(scope="function")
-def mcp_client_otel(mcp_server_url_otel):
+def mcp_client_otel(mcp_server_url_otel: str) -> Any:
     """MCPClient talking to an OTel-enabled server (both modes)."""
     from .test_common import MCPClient
 
