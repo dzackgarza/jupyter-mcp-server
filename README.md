@@ -10,7 +10,7 @@
 
 This is a thin FastAPI transport layer that replaces the MCP protocol with a stateless REST API. Each request names the target notebook via a deterministic `nb_<base64>` ID derived from its Jupyter-root-relative filepath — no session state, no persisted mappings, survives restarts.
 
----
+* * *
 
 ## Architecture
 
@@ -19,22 +19,26 @@ Custom GPT → HTTPS → cloudflared tunnel → FastAPI adapter → existing too
 ```
 
 - **Adapter**: Uvicorn on `127.0.0.1:4042`, `workers=1` (required by `asyncio.Lock` around `NotebookManager`)
+
 - **Public URL**: `https://jupyter-assistant.dzackgarza.com`
+
 - **JupyterLab**: port 8888, no auth, `root_dir=~/research/computations/notebooks`
+
 - **Default kernelspec**: `sagemath` — kernel pre-started via Jupyter REST API (not the MCP tool's default `python3`)
+
 - **Lock model**: single `asyncio.Lock` around all notebook-specific operations; one Uvicorn worker enforces serialization
 
 ### Key Design Decisions
 
 | Decision | Rationale |
-|---|---|
+| --- | --- |
 | Deterministic `nb_<base64>` IDs | No persisted mapping; survives restart; reversible to filepath |
 | `x-openai-isConsequential: false` on mutation routes | Enables "always allow" mode in ChatGPT Actions |
 | Pre-start kernel via REST API | `UseNotebookTool` connects to a pre-started kernel with the requested kernelspec instead of defaulting to `python3` |
 | `workers=1` | `NotebookManager` is process-wide state; >1 worker races on the current-notebook pointer |
 | Global exception handler | Catches unhandled exceptions with structured JSON + traceback so the GPT can diagnose failures |
 
----
+* * *
 
 ## API Endpoints
 
@@ -43,7 +47,7 @@ All routes are served under `https://jupyter-assistant.dzackgarza.com`. The full
 ### Server-level
 
 | Method | Path | Operation ID | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | GET | `/health` | `health` | Report API and Jupyter server readiness |
 | GET | `/v1/files` | `list_files` | List arbitrary files and directories on the Jupyter server |
 | GET | `/v1/files/content` | `read_file` | Read a non-notebook file by Jupyter-root-relative path |
@@ -54,7 +58,7 @@ All routes are served under `https://jupyter-assistant.dzackgarza.com`. The full
 ### Notebook lifecycle
 
 | Method | Path | Operation ID | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | POST | `/v1/notebooks/use` | `use_notebook` | Open or create a notebook and reuse its session-bound kernel |
 | POST | `/v1/notebooks/{notebook_id}/restart` | `restart_notebook` | Replace the session with a fresh Sage kernel by default; pass `kernel_name` to override |
 | POST | `/v1/notebooks/{notebook_id}/unuse` | `unuse_notebook` | Disconnect the Assistant client without shutting down the shared session kernel |
@@ -62,14 +66,14 @@ All routes are served under `https://jupyter-assistant.dzackgarza.com`. The full
 ### Reading
 
 | Method | Path | Operation ID | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | GET | `/v1/notebooks/{notebook_id}` | `read_notebook` | Read notebook contents (paginated; `brief` or `detailed` format) |
 | GET | `/v1/notebooks/{notebook_id}/cells/{cell_index}` | `read_cell` | Read a single cell by index |
 
 ### Cell mutations
 
 | Method | Path | Operation ID | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | POST | `/v1/notebooks/{notebook_id}/cells` | `insert_cell` | Insert a cell at the given index |
 | PUT | `/v1/notebooks/{notebook_id}/cells/{cell_index}` | `overwrite_cell_source` | Overwrite cell source |
 | PATCH | `/v1/notebooks/{notebook_id}/cells/{cell_index}` | `edit_cell_source` | Find-and-replace edit on cell source |
@@ -80,23 +84,20 @@ All routes are served under `https://jupyter-assistant.dzackgarza.com`. The full
 ### Execution
 
 | Method | Path | Operation ID | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | POST | `/v1/notebooks/{notebook_id}/cells/{cell_index}/execute` | `execute_cell` | Execute a cell by index |
 | POST | `/v1/notebooks/{notebook_id}/cells/insert-and-execute` | `insert_execute_code_cell` | Insert + execute a code cell in one step |
 | POST | `/v1/notebooks/{notebook_id}/execute-code` | `execute_code` | Execute temporary code without inserting a cell |
 | GET | `/v1/notebooks/{notebook_id}/execution` | `get_execution_status` | Poll a handed-off execution without waiting for the notebook lock |
 
-Execution requests accept `handoff_after_seconds` (default `35`, maximum `40`). If
-the computation finishes before that deadline, the response contains
-`status: "complete"` and inline outputs. Otherwise, the response remains HTTP 200,
-contains `status: "running"`, and tells the caller when and where to poll. The
-kernel continues computing.
+Execution requests accept `handoff_after_seconds` (default `35`, maximum `40`). If the computation finishes before that deadline, the response contains `status: "complete"` and inline outputs.
+Otherwise, the response remains HTTP 200, contains `status: "running"`, and tells the caller when and where to poll.
+The kernel continues computing.
 
-`use_notebook` reuses the Jupyter session already bound to the notebook path. If
-the requested kernelspec differs from the active session's kernelspec, the API
-returns an actionable conflict instead of silently selecting the wrong interpreter.
+`use_notebook` reuses the Jupyter session already bound to the notebook path.
+If the requested kernelspec differs from the active session's kernelspec, the API returns an actionable conflict instead of silently selecting the wrong interpreter.
 
----
+* * *
 
 ## GPT Actions Setup
 
@@ -105,11 +106,14 @@ This adapter is designed for ChatGPT Custom GPTs via the Actions feature.
 ### 1. Import the OpenAPI spec
 
 1. Open the GPT editor → **Actions** → **Create new action**
+
 2. Click **Import from URL**
+
 3. Paste:
    ```
    https://jupyter-assistant.dzackgarza.com/openapi.json
    ```
+
 4. The schema loads with all endpoints, request/response models, and operation IDs
 
 ### 2. Authentication
@@ -120,9 +124,11 @@ If you add auth later, set the GPT to send an API key header and add a middlewar
 
 ### 3. "Always allow" mutations
 
-Mutation endpoints carry `x-openai-isConsequential: false` in the OpenAPI spec. This tells ChatGPT the operations are non-destructive, enabling the **"Always allow"** toggle so the GPT doesn't prompt for confirmation on every write.
+Mutation endpoints carry `x-openai-isConsequential: false` in the OpenAPI spec.
+This tells ChatGPT the operations are non-destructive, enabling the **"Always allow"** toggle so the GPT doesn't prompt for confirmation on every write.
 
-Without this, ChatGPT asks "Allow this action?" on every cell insert, execute, delete, etc. — unusable for a multi-step workflow.
+Without this, ChatGPT asks "Allow this action?"
+on every cell insert, execute, delete, etc. — unusable for a multi-step workflow.
 
 ### 4. Suggested system prompt
 
@@ -158,11 +164,14 @@ After saving the GPT, try:
 > "List my notebooks and show me what's in periods/fermat-periods.ipynb"
 
 The GPT should:
+
 1. Call `list_notebooks` → get the file list
+
 2. Call `use_notebook` with `periods/fermat-periods.ipynb` → get a `notebook_id`
+
 3. Call `read_notebook` with that ID → return cell contents
 
----
+* * *
 
 ## JupyterLab Setup
 
@@ -171,7 +180,9 @@ The adapter expects a running JupyterLab on port 8888 with no authentication and
 ### Requirements
 
 - **JupyterLab 4.4.x** with `jupyter-collaboration` (enables real-time model sync that the tool classes depend on)
+
 - **A SageMath kernel** — or any other kernelspec you want as default
+
 - **Notebooks root** — a directory where the adapter looks for `.ipynb` files (default: `~/research/computations/notebooks`)
 
 ### Quick start (manual)
@@ -188,8 +199,11 @@ jupyter lab \
 ```
 
 Flags explained:
+
 - `--IdentityProvider.token=''` and `--IdentityProvider.password_required=False` — no auth (the adapter runs on localhost; cloudflared handles HTTPS)
+
 - `--ServerApp.disable_check_xsrf=True` — required for the adapter to make API calls without CSRF tokens
+
 - `--ServerApp.root_dir` — the directory where notebook files live; this becomes the root for `list_notebooks` and `use_notebook` paths
 
 ### systemd user service (recommended)
@@ -228,7 +242,8 @@ systemctl --user enable --now jupyter-sagemath.service
 systemctl --user status jupyter-sagemath.service
 ```
 
-The `ExecStartPre` script (optional) kills any stale process already bound to port 8888 before starting. Remove the line if you don't need it.
+The `ExecStartPre` script (optional) kills any stale process already bound to port 8888 before starting.
+Remove the line if you don't need it.
 
 ### Verify
 
@@ -243,7 +258,7 @@ curl -s http://localhost:8888/api/kernelspecs | python3 -c "import sys,json; pri
 ### Available kernels on this machine
 
 | Kernelspec | Language | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `sagemath` | SageMath | Default for the adapter |
 | `python3` | Python 3 | Standard CPython |
 | `pari_jupyter` | PARI/GP | Number theory |
@@ -256,14 +271,16 @@ curl -s http://localhost:8888/api/kernelspecs | python3 -c "import sys,json; pri
 
 Pass any of these as `kernel_name` in the `use_notebook` request body.
 
----
+* * *
 
 ## Setup
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.14+
+
 - JupyterLab 4.4.x running locally on port 8888 (see JupyterLab Setup above)
+
 - A SageMath kernel (`sagemath`) installed and available in Jupyter
 
 ### Install
@@ -298,10 +315,8 @@ uvicorn jupyter_mcp_server.assistant_api:app --host 127.0.0.1 --port 4042 --work
 
 ### systemd user services (recommended)
 
-Both long-running pieces — the adapter and the Cloudflare tunnel — are vendored
-as systemd user units in [`dev/systemd/`](dev/systemd). Install them by absolute
-path so systemd symlinks the repo copies and the repo stays the single source of
-truth:
+Both long-running pieces — the adapter and the Cloudflare tunnel — are vendored as systemd user units in [`dev/systemd/`](dev/systemd).
+Install them by absolute path so systemd symlinks the repo copies and the repo stays the single source of truth:
 
 ```bash
 systemctl --user enable --now \
@@ -313,12 +328,9 @@ systemctl --user is-active jupyter-assistant-api jupyter-assistant-tunnel
 
 After editing a vendored unit, `systemctl --user daemon-reload && systemctl --user restart <unit>`.
 
-The units hardcode `/home/dzack` paths — this deployment is single-machine by
-design. Adjust the paths when installing elsewhere. `jupyter-assistant-tunnel`
-reads `~/.cloudflared/config-jupyter-assistant.yml`, which is **not** vendored
-because it names a credentials file; its ingress must point at `127.0.0.1:4042`.
-If that host:port disagrees with the adapter, the public hostname serves
-Cloudflare **error 502**; if the tunnel is not running at all, **error 1033**.
+The units hardcode `/home/dzack` paths — this deployment is single-machine by design.
+Adjust the paths when installing elsewhere.
+`jupyter-assistant-tunnel` reads `~/.cloudflared/config-jupyter-assistant.yml`, which is **not** vendored because it names a credentials file; its ingress must point at `127.0.0.1:4042`. If that host:port disagrees with the adapter, the public hostname serves Cloudflare **error 502**; if the tunnel is not running at all, **error 1033**.
 
 ### Verify
 
@@ -329,12 +341,13 @@ curl http://127.0.0.1:4042/health
 
 ### Logging
 
-The adapter runs as a single uvicorn worker. All logs go to **stdout/stderr** of the terminal (or systemd journal) where uvicorn was started.
+The adapter runs as a single uvicorn worker.
+All logs go to **stdout/stderr** of the terminal (or systemd journal) where uvicorn was started.
 
 #### Where to look
 
 | Scenario | How to check logs |
-|---|---|
+| --- | --- |
 | Running in a terminal | Logs print directly to that terminal |
 | Running in a tmux session | `tmux attach -t <session>` and scroll |
 | systemd user service | `journalctl --user -u jupyter-assistant-api -f` |
@@ -413,7 +426,7 @@ journalctl --user -u jupyter-assistant-api -n 50
 journalctl --user -u jupyter-assistant-api -p err
 ```
 
----
+* * *
 
 ## Notebook ID Scheme
 
@@ -426,9 +439,10 @@ stripped padding:      cGVyaW9kcy9mZXJtYXQtcGVyaW9kcy5pcHluYg
 notebook_id:           nb_cGVyaW9kcy9mZXJtYXQtcGVyaW9kcy5pcHluYg
 ```
 
-The ID is **not** a secret — only a route-safe representation of the filepath. Decode it with `decode_notebook_id()` from `jupyter_mcp_server.notebook_id`.
+The ID is **not** a secret — only a route-safe representation of the filepath.
+Decode it with `decode_notebook_id()` from `jupyter_mcp_server.notebook_id`.
 
----
+* * *
 
 ## Testing
 
@@ -442,13 +456,11 @@ Integration tests require a running JupyterLab on port 8888:
 pytest tests/test_assistant_api_integration.py -v
 ```
 
----
+* * *
 
 ## cloudflared Tunnel
 
-The public endpoint at `https://jupyter-assistant.dzackgarza.com` is served
-through a Cloudflare named tunnel that routes HTTPS traffic to the local
-adapter at `127.0.0.1:4042`.
+The public endpoint at `https://jupyter-assistant.dzackgarza.com` is served through a Cloudflare named tunnel that routes HTTPS traffic to the local adapter at `127.0.0.1:4042`.
 
 ### 1. Install cloudflared
 
@@ -553,17 +565,17 @@ curl -s https://jupyter-assistant.dzackgarza.com/health | python3 -m json.tool
 # }
 ```
 
----
+* * *
 
 ## Upstream
 
-This repo is a fork of [datalayer/jupyter-mcp-server](https://github.com/datalayer/jupyter-mcp-server). The MCP server infrastructure (tool classes, notebook manager, kernel client) is preserved; only the transport layer is replaced. Upstream documentation for tool behavior lives at [jupyter-mcp-server.datalayer.tech](https://jupyter-mcp-server.datalayer.tech).
+This repo is a fork of [datalayer/jupyter-mcp-server](https://github.com/datalayer/jupyter-mcp-server).
+The MCP server infrastructure (tool classes, notebook manager, kernel client) is preserved; only the transport layer is replaced.
+Upstream documentation for tool behavior lives at [jupyter-mcp-server.datalayer.tech](https://jupyter-mcp-server.datalayer.tech).
 
 ## Error contract
 
-Every failing request returns **HTTP 200** with `ok: false`. The status the
-failure would otherwise have carried is in `http_status`; clients branch on
-`ok`, never on the wire status.
+Every failing request returns **HTTP 200** with `ok: false`. The status the failure would otherwise have carried is in `http_status`; clients branch on `ok`, never on the wire status.
 
 ```json
 {
@@ -577,25 +589,15 @@ failure would otherwise have carried is in `http_status`; clients branch on
 }
 ```
 
-This is deliberate. The consumer is a GPT Action whose HTTP client calls
-`raise_for_status()`, so on any non-2xx it raises and shows the caller only
-the exception type (`ClientResponseError: <class 'aiohttp...'>`) — the
-response body, and every diagnostic in it, is discarded before the model sees
-it. Returning 200 is what makes failures readable to the only thing reading
-them.
+This is deliberate.
+The consumer is a GPT Action whose HTTP client calls `raise_for_status()`, so on any non-2xx it raises and shows the caller only the exception type (`ClientResponseError: <class 'aiohttp...'>`) — the response body, and every diagnostic in it, is discarded before the model sees it.
+Returning 200 is what makes failures readable to the only thing reading them.
 
-`http_status` carries the real cause: a Jupyter-boundary status is propagated
-from the exception chain (404 for a missing path) rather than flattened to
-500, so a caller can distinguish "wrong path" from "server fault".
+`http_status` carries the real cause: a Jupyter-boundary status is propagated from the exception chain (404 for a missing path) rather than flattened to 500, so a caller can distinguish "wrong path" from "server fault".
 
 ### Sage kernel
 
-`.envrc` prepends `dev/jupyter` to `JUPYTER_PATH`, which shadows the system
-`sagemath` kernelspec with one whose `argv` uses `sage --python`. The system
-spec uses a bare `python`, resolved from the launching process's PATH, so a
-Jupyter server started under this project's `.venv` gets an interpreter that
-cannot `import sage`; the kernel then crash-loops and the websocket handshake
-fails with an opaque 500. Run `direnv allow` once after cloning.
+`.envrc` prepends `dev/jupyter` to `JUPYTER_PATH`, which shadows the system `sagemath` kernelspec with one whose `argv` uses `sage --python`. The system spec uses a bare `python`, resolved from the launching process's PATH, so a Jupyter server started under this project's `.venv` gets an interpreter that cannot `import sage`; the kernel then crash-loops and the websocket handshake fails with an opaque 500. Run `direnv allow` once after cloning.
 
 ## Deployment (systemd + Cloudflare tunnel)
 
@@ -607,8 +609,7 @@ Three user units, vendored in `dev/systemd/`:
 | `jupyter-assistant-api` | this adapter, on `127.0.0.1:4042` |
 | `jupyter-assistant-tunnel` | Cloudflare tunnel publishing the adapter |
 
-Install by absolute path so `~/.config/systemd/user/` holds symlinks into the repo,
-and edits take effect on `daemon-reload`:
+Install by absolute path so `~/.config/systemd/user/` holds symlinks into the repo, and edits take effect on `daemon-reload`:
 
 ```bash
 systemctl --user enable --now \
@@ -618,31 +619,24 @@ systemctl --user enable --now \
 
 ### Port contract
 
-`127.0.0.1:4042` appears in three places that must agree: `main()` in
-`jupyter_mcp_server/assistant_api.py`, the `ingress` block in
-`dev/cloudflared/config-jupyter-assistant.yml`, and this document. The API has no
-authentication, so it binds loopback only — the tunnel is the sole public path.
+`127.0.0.1:4042` appears in three places that must agree: `main()` in `jupyter_mcp_server/assistant_api.py`, the `ingress` block in `dev/cloudflared/config-jupyter-assistant.yml`, and this document.
+The API has no authentication, so it binds loopback only — the tunnel is the sole public path.
 
 ### Tunnel config
 
-`dev/cloudflared/config-jupyter-assistant.yml` is vendored; only the credentials
-JSON stays in `~/.cloudflared/`, referenced by path, so no secret is in the repo.
+`dev/cloudflared/config-jupyter-assistant.yml` is vendored; only the credentials JSON stays in `~/.cloudflared/`, referenced by path, so no secret is in the repo.
 
 Two settings there are load-bearing and non-obvious:
 
-- **`edge-ip-version: "4"`** — this host has no working IPv6 egress. Without it,
-  `cloudflared` binds `[::]` for QUIC and every dial fails with `sendmsg: network
-  is unreachable`, the tunnel never registers, and the hostname serves Cloudflare
-  **1033** (surfacing as HTTP **530**) while the local API is perfectly healthy.
-  The value **must be quoted**: the bare int is rejected with `expected string
-  found int for edge-ip-version` and the unit crash-loops.
+- **`edge-ip-version: "4"`** — this host has no working IPv6 egress.
+  Without it, `cloudflared` binds `[::]` for QUIC and every dial fails with `sendmsg: network is unreachable`, the tunnel never registers, and the hostname serves Cloudflare **1033** (surfacing as HTTP **530**) while the local API is perfectly healthy.
+  The value **must be quoted**: the bare int is rejected with `expected string found int for edge-ip-version` and the unit crash-loops.
+
 - **`protocol: http2`** — uses TCP 7844 instead of QUIC over UDP 7844.
 
 ### Diagnosing 530 / 1033
 
-A 530 means the origin is unreachable *from Cloudflare*, so check in this order —
-the process being up proves nothing, since `cloudflared` holds a PID while failing
-to register:
+A 530 means the origin is unreachable *from Cloudflare*, so check in this order — the process being up proves nothing, since `cloudflared` holds a PID while failing to register:
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4042/health   # origin
@@ -650,6 +644,5 @@ systemctl --user is-active jupyter-assistant-api jupyter-assistant-tunnel
 journalctl --user -u jupyter-assistant-tunnel -n 20 --no-pager          # decisive
 ```
 
-Look for `Registered tunnel connection` (healthy) versus `Failed to dial a quic
-connection` (edge unreachable). Test edge reachability more than once before
-concluding a port is blocked — a single failed probe is not evidence.
+Look for `Registered tunnel connection` (healthy) versus `Failed to dial a quic connection` (edge unreachable).
+Test edge reachability more than once before concluding a port is blocked — a single failed probe is not evidence.

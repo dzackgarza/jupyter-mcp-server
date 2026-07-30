@@ -34,8 +34,9 @@ import socket
 import subprocess
 import time
 import uuid
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 from http import HTTPStatus
+from typing import Any, cast
 
 import pytest
 import pytest_asyncio
@@ -57,11 +58,11 @@ def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         s.listen(1)
-        return s.getsockname()[1]
+        return int(s.getsockname()[1])
 
 
 @pytest_asyncio.fixture
-async def client(assistant_api_url: str) -> AsyncClient:
+async def client(assistant_api_url: str) -> AsyncGenerator[AsyncClient]:
     """Async HTTP client pointed at the Assistant API."""
     async with AsyncClient(base_url=assistant_api_url, timeout=60) as c:
         yield c
@@ -141,7 +142,7 @@ def assistant_api_url(jupyter_server: str) -> Generator[str]:
 
 
 @pytest.fixture(autouse=True)
-def _cleanup_test_notebooks(jupyter_server: str, assistant_api_url: str):
+def _cleanup_test_notebooks(jupyter_server: str, assistant_api_url: str) -> Generator[None]:
     """Delete test notebooks from the Jupyter server after each test."""
     yield
     names = (
@@ -203,11 +204,11 @@ def _nb_id(path: str) -> str:
     return encode_notebook_id(path)
 
 
-async def _jupyter_json(jupyter_server: str, path: str) -> list[dict]:
+async def _jupyter_json(jupyter_server: str, path: str) -> list[dict[str, Any]]:
     async with AsyncClient(base_url=jupyter_server, timeout=10) as jupyter:
         response = await jupyter.get(path, params={"token": "MY_TOKEN"})
         response.raise_for_status()
-        return response.json()
+        return cast("list[dict[str, Any]]", response.json())
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +593,7 @@ def test_7_reconnect_after_adapter_restart(jupyter_server: str) -> None:
                 pass
             time.sleep(1)
         pytest.fail("Adapter did not start")
+        raise AssertionError("Adapter did not start")
 
     port1 = _find_free_port()
     proc1 = _start_api(port1)
@@ -715,28 +717,28 @@ async def test_9_concurrent_operations_serialized(client: AsyncClient) -> None:
     # If the lock works, both complete without corrupting kernel state.
     # We set a variable in one and read it in the other; the lock
     # guarantees one happens before the other.
-    async def _set() -> dict:
+    async def _set() -> dict[str, Any]:
         r = await client.post(
             f"/v1/notebooks/{nb_id}/execute-code",
             json={"code": "counter = 99", "handoff_after_seconds": 10},
         )
-        return r.json()
+        return cast("dict[str, Any]", r.json())
 
-    async def _read() -> dict:
+    async def _read() -> dict[str, Any]:
         r = await client.post(
             f"/v1/notebooks/{nb_id}/execute-code",
             json={"code": "print(counter)", "handoff_after_seconds": 10},
         )
-        return r.json()
+        return cast("dict[str, Any]", r.json())
 
     results = await asyncio.gather(_set(), _read(), return_exceptions=True)
 
     # Both should succeed (no exceptions), proving serialization — the
     # read may or may not see `counter` depending on ordering, but neither
     # should fail with a 500 or raise.
-    for r in results:
-        assert not isinstance(r, Exception), f"Concurrent call failed: {r}"
-        assert r.get("ok") is True, f"Response not ok: {r}"
+    for result in results:
+        assert not isinstance(result, BaseException), f"Concurrent call failed: {result}"
+        assert result.get("ok") is True, f"Response not ok: {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -772,9 +774,7 @@ async def test_10_jupyter_boundary_failure_is_legible(client: AsyncClient) -> No
     assert body["http_status"] == HTTPStatus.NOT_FOUND, resp.text
 
 
-async def test_use_notebook_reuses_one_session_bound_kernel(
-    client: AsyncClient, jupyter_server: str
-) -> None:
+async def test_use_notebook_reuses_one_session_bound_kernel(client: AsyncClient, jupyter_server: str) -> None:
     path = "test-session-reuse.ipynb"
 
     first = await client.post(
@@ -915,17 +915,12 @@ async def test_handed_off_execution_does_not_block_another_notebook(
     assert running.json()["status"] == "running", running.text
 
     started_at = time.monotonic()
-    unrelated = await client.get(
-        f"/v1/notebooks/{second.json()['notebook_id']}"
-    )
+    unrelated = await client.get(f"/v1/notebooks/{second.json()['notebook_id']}")
     elapsed = time.monotonic() - started_at
 
     assert unrelated.status_code == HTTPStatus.OK, unrelated.text
     assert unrelated.json()["ok"] is True, unrelated.text
-    assert elapsed < 2, (
-        "An execution on one notebook monopolized the process-wide runtime lock "
-        f"for {elapsed:.1f}s and blocked an unrelated notebook."
-    )
+    assert elapsed < 2, f"An execution on one notebook monopolized the process-wide runtime lock for {elapsed:.1f}s and blocked an unrelated notebook."
 
 
 async def test_stopped_kernel_is_diagnosed_and_recoverable(
@@ -946,10 +941,7 @@ async def test_stopped_kernel_is_diagnosed_and_recoverable(
     running = await client.post(
         f"/v1/notebooks/{notebook_id}/execute-code",
         json={
-            "code": (
-                "import os, signal; "
-                "os.kill(os.getpid(), signal.SIGSTOP)"
-            ),
+            "code": ("import os, signal; os.kill(os.getpid(), signal.SIGSTOP)"),
             "handoff_after_seconds": 1,
         },
     )
@@ -1048,7 +1040,7 @@ async def test_mutation_rejects_malformed_notebook_before_rtc_connection(
     path = "test-malformed-preflight.ipynb"
     notebook_id = encode_notebook_id(path)
 
-    malformed = {
+    malformed: dict[str, Any] = {
         "type": "notebook",
         "format": "json",
         "content": {
@@ -1105,4 +1097,9 @@ async def test_mutation_rejects_malformed_notebook_before_rtc_connection(
             f"/api/contents/{path}",
             params={"token": "MY_TOKEN", "content": "1"},
         )
-    assert persisted.json()["content"]["cells"][0]["source"] == malformed["content"]["cells"][0]["source"]
+    persisted_model = cast("dict[str, Any]", persisted.json())
+    persisted_content = cast("dict[str, Any]", persisted_model["content"])
+    persisted_cells = cast("list[dict[str, Any]]", persisted_content["cells"])
+    malformed_content = cast("dict[str, Any]", malformed["content"])
+    malformed_cells = cast("list[dict[str, Any]]", malformed_content["cells"])
+    assert persisted_cells[0]["source"] == malformed_cells[0]["source"]

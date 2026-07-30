@@ -2,14 +2,17 @@
 
 **Always reference these instructions first and fallback to search or bash commands only when you encounter unexpected information that does not match the info here.**
 
-Jupyter MCP Server is a Python-based Model Context Protocol (MCP) server implementation that enables real-time interaction with Jupyter Notebooks. The project uses a modern Python build system with hatch, and includes comprehensive testing, linting, and documentation.
+Jupyter MCP Server is a Python-based Model Context Protocol (MCP) server implementation that enables real-time interaction with Jupyter Notebooks.
+The project uses a modern Python build system with hatch, and includes comprehensive testing, linting, and documentation.
 
 ## Working Effectively
 
 ### Environment Setup
 
-- **Python Requirements**: Python 3.10 or higher (tested with 3.9-3.13)
-- **Network Considerations**: PyPI installs may fail due to SSL certificate issues or timeout limitations. This is a known environment constraint.
+- **Python Requirements**: Python 3.14 or higher
+
+- **Network Considerations**: PyPI installs may fail due to SSL certificate issues or timeout limitations.
+  This is a known environment constraint.
 
 ### Build and Install (CRITICAL: Network Limitations)
 
@@ -30,7 +33,9 @@ docker build -t jupyter-mcp-server .
 **NETWORK TIMEOUT WARNING**: pip install commands may fail with SSL certificate errors or read timeouts when connecting to PyPI. If installs fail:
 
 - Try increasing timeout: `pip install --timeout=300`
+
 - Use Docker build which handles dependencies internally
+
 - Document the network limitation in any testing notes
 
 ### Core Development Commands
@@ -161,7 +166,7 @@ docker run -i --rm \
    PYTHONPATH=. python -c "import jupyter_mcp_server; print('SUCCESS')"
    ```
 
-1. **Configuration Validation**:
+2. **Configuration Validation**:
 
    ```bash
    # Verify pyproject.toml is valid
@@ -171,7 +176,7 @@ docker run -i --rm \
    python -c "import jupyter_mcp_server.server, jupyter_mcp_server.models"
    ```
 
-1. **Documentation Build** (when Node.js available):
+3. **Documentation Build** (when Node.js available):
 
    ```bash
    cd docs/
@@ -184,28 +189,43 @@ docker run -i --rm \
 ### Key Directories
 
 - **`jupyter_mcp_server/`**: Main Python package
+
   - `server.py`: Core MCP server implementation with FastMCP integration
+
   - `models.py`: Pydantic data models for document and runtime handling
+
   - `utils.py`: Utility functions for output extraction and processing
+
   - `tests/`: Unit tests (internal package tests)
+
 - **`tests/`**: Integration tests using pytest-asyncio
+
 - **`docs/`**: Docusaurus-based documentation site (Node.js/React)
+
 - **`dev/content/`**: Development Jupyter notebook files for testing
+
 - **`.github/workflows/`**: CI/CD pipeline definitions
 
 ### Important Files
 
 - **`pyproject.toml`**: Build configuration, dependencies, and tool settings
+
 - **`Makefile`**: Development workflow automation
+
 - **`Dockerfile`**: Container build definition
+
 - **`.github/workflows/lint.sh`**: Linting pipeline script
+
 - **`pytest.ini`**: Test configuration
 
 ### Frequently Modified Areas
 
 - **Server Logic**: `jupyter_mcp_server/server.py` - Main MCP server implementation
+
 - **Data Models**: `jupyter_mcp_server/models.py` - When adding new MCP tools or changing data structures
+
 - **Tests**: `tests/test_mcp.py` - Integration tests for MCP functionality
+
 - **Documentation**: `docs/src/` - When updating API documentation or user guides
 
 ## Common Tasks and Gotchas
@@ -213,20 +233,27 @@ docker run -i --rm \
 ### Adding New MCP Tools
 
 1. Add tool definition in `jupyter_mcp_server/server.py`
-1. Update models in `jupyter_mcp_server/models.py` if needed
-1. Add tests in `tests/test_mcp.py`
-1. Update documentation in `docs/`
+
+2. Update models in `jupyter_mcp_server/models.py` if needed
+
+3. Add tests in `tests/test_mcp.py`
+
+4. Update documentation in `docs/`
 
 ### Dependency Management
 
 - **Core deps**: Defined in `pyproject.toml` dependencies section
+
 - **Dev deps**: Use `[test,lint,typing]` optional dependencies
+
 - **Special handling**: `datalayer_pycrdt` has specific version requirements (0.12.17)
 
 ### CI/CD Pipeline Expectations
 
-- **Build Matrix**: Tests run on Ubuntu, macOS, Windows with Python 3.9, 3.13
+- **Build Matrix**: Tests run on Ubuntu, macOS, Windows with Python 3.14
+
 - **Critical Timing**: Full CI pipeline takes 20-30 minutes
+
 - **Required Checks**: pytest, ruff, mypy, mdformat, pyproject validation
 
 ### Environment Variables for Testing
@@ -267,20 +294,29 @@ hatch test                           # May need PyPI for dependencies
 ### Required Workarounds
 
 1. **Document network failures** when they occur: "pip install fails due to network limitations"
-1. **Use syntax validation** instead of full testing when pip installs fail
-1. **Prefer Docker approach** for consistent builds when possible
-1. **Set generous timeouts** (60+ minutes) for any network operations
-1. **Never cancel long-running commands** - document expected timing instead
+
+2. **Use syntax validation** instead of full testing when pip installs fail
+
+3. **Prefer Docker approach** for consistent builds when possible
+
+4. **Set generous timeouts** (60+ minutes) for any network operations
+
+5. **Never cancel long-running commands** - document expected timing instead
 
 ## Timing Expectations
 
 **NEVER CANCEL these operations - they are expected to take significant time:**
 
 - **pip install ".[test,lint,typing]"**: 5-10 minutes (when network works)
+
 - **mypy --install-types --non-interactive**: 10-15 minutes first run
+
 - **Docker build**: 10-15 minutes
+
 - **Full test suite**: 15-20 minutes
+
 - **Documentation build**: 3-5 minutes
+
 - **CI pipeline**: 20-30 minutes total
 
 Always set timeouts to at least double these estimates to account for network variability.

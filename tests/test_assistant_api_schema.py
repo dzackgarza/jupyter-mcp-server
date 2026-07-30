@@ -98,10 +98,7 @@ async def test_unexpected_route_failure_is_contained(
     request_id = response.headers["X-Request-ID"]
     assert body["request_id"] == request_id
     assert any(
-        "assistant_request_end" in record.message
-        and f"request_id={request_id}" in record.message
-        and "notebook_id=nb_test" in record.message
-        for record in caplog.records
+        "assistant_request_end" in record.message and f"request_id={request_id}" in record.message and "notebook_id=nb_test" in record.message for record in caplog.records
     )
 
 
@@ -129,12 +126,7 @@ async def test_public_openapi_schema_is_valid_and_current() -> None:
     server_urls = {server.get("url") for server in schema.get("servers", [])}
     assert public_origin in server_urls
 
-    operations = {
-        operation.get("operationId")
-        for path_item in schema.get("paths", {}).values()
-        for operation in path_item.values()
-        if isinstance(operation, dict)
-    }
+    operations = {operation.get("operationId") for path_item in schema.get("paths", {}).values() for operation in path_item.values() if isinstance(operation, dict)}
     assert EXPECTED_OPERATION_IDS <= operations
 
     paths = schema["paths"]
@@ -143,9 +135,7 @@ async def test_public_openapi_schema_is_valid_and_current() -> None:
     write_operation = paths["/v1/files/library"]["post"]
     assert write_operation["operationId"] == "write_library_file"
     assert write_operation["x-openai-isConsequential"] is False
-    assert write_operation["requestBody"]["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/WriteLibraryFileRequest"
-    }
+    assert write_operation["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/WriteLibraryFileRequest"}
 
 
 def test_restart_notebook_request_body_schema_is_tool_importable_object() -> None:
@@ -158,10 +148,7 @@ def test_restart_notebook_request_body_schema_is_tool_importable_object() -> Non
 def test_read_notebook_schema_directs_bounded_overview_then_detail() -> None:
     """The Action schema must make the existing bounded workflow discoverable."""
     operation = app.openapi()["paths"]["/v1/notebooks/{notebook_id}"]["get"]
-    parameters = {
-        parameter["name"]: parameter
-        for parameter in operation["parameters"]
-    }
+    parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
 
     format_description = parameters["response_format"]["description"]
     limit_description = parameters["limit"]["description"]
@@ -194,9 +181,7 @@ def test_mutation_endpoints_are_non_consequential(op_id: str) -> None:
     """
     route = next(r for r in _api_routes() if r.operation_id == op_id)
     extra = getattr(route, "openapi_extra", {}) or {}
-    assert extra.get("x-openai-isConsequential") is False, (
-        f"{op_id} missing x-openai-isConsequential: false"
-    )
+    assert extra.get("x-openai-isConsequential") is False, f"{op_id} missing x-openai-isConsequential: false"
 
 
 def test_get_endpoints_are_read_only() -> None:
@@ -204,4 +189,5 @@ def test_get_endpoints_are_read_only() -> None:
     read_ops = EXPECTED_OPERATION_IDS - MUTATION_OPERATION_IDS
     for op_id in read_ops:
         route = next(r for r in _api_routes() if r.operation_id == op_id)
+        assert route.methods is not None
         assert "GET" in route.methods, f"{op_id} is not GET: {route.methods}"

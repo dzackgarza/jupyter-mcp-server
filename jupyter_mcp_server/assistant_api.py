@@ -18,20 +18,22 @@ mutation endpoints so the GPT can use "always allow" behavior.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import keyword
 import logging
 import os
 import re
 import time
 import uuid
-from typing import Any, Literal
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal, cast
 from urllib.parse import quote
 
 import nbformat
 import uvicorn
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -78,11 +80,7 @@ app = FastAPI(
         "implementations.  A notebook is identified by a deterministic "
         "nb_<base64> ID derived from its Jupyter-root-relative filepath."
     ),
-    servers=(
-        [{"url": server_url}]
-        if (server_url := os.getenv("ASSISTANT_API_SERVER_URL"))
-        else []
-    ),
+    servers=([{"url": server_url}] if (server_url := os.getenv("ASSISTANT_API_SERVER_URL")) else []),
 )
 
 runtime = AssistantRuntime()
@@ -181,9 +179,7 @@ def _error_json(request: Request, exc: BaseException, status_code: int) -> JSONR
             http_status=status_code,
             error_type=type(exc).__name__,
             error_message=_describe(exc),
-            traceback="".join(
-                tb_mod.format_exception(type(exc), exc, exc.__traceback__)
-            ),
+            traceback="".join(tb_mod.format_exception(type(exc), exc, exc.__traceback__)),
             notebook_id=notebook_id,
             notebook_path=notebook_path,
             request_id=current_request_id(),
@@ -192,14 +188,13 @@ def _error_json(request: Request, exc: BaseException, status_code: int) -> JSONR
 
 
 @app.middleware("http")
-async def _contain_unexpected_route_failures(request: Request, call_next):
+async def _contain_unexpected_route_failures(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
     """Correlate request lifecycle and contain failures in one envelope."""
     supplied_request_id = request.headers.get("X-Request-ID", "")
-    request_id = (
-        supplied_request_id
-        if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied_request_id)
-        else uuid.uuid4().hex
-    )
+    request_id = supplied_request_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied_request_id) else uuid.uuid4().hex
     token = bind_request_id(request_id)
     started_at = time.monotonic()
     notebook_match = re.match(r"^/v1/notebooks/(nb_[^/]+)(?:/|$)", request.url.path)
@@ -218,8 +213,7 @@ async def _contain_unexpected_route_failures(request: Request, call_next):
             response = _error_json(request, exc, _boundary_status(exc) or 500)
         response.headers["X-Request-ID"] = request_id
         logger.info(
-            "assistant_request_end request_id=%s method=%s path=%s notebook_id=%s "
-            "kernel_id=%s wire_status=%s elapsed_seconds=%.3f",
+            "assistant_request_end request_id=%s method=%s path=%s notebook_id=%s kernel_id=%s wire_status=%s elapsed_seconds=%.3f",
             request_id,
             request.method,
             request.url.path,
@@ -245,9 +239,7 @@ async def _global_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 
 @app.exception_handler(StarletteHTTPException)
-async def _http_exception_handler(
-    request: Request, exc: StarletteHTTPException
-) -> JSONResponse:
+async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """Give deliberate HTTPExceptions the same envelope as unhandled ones.
 
     FastAPI's default returns ``{"detail": ...}``, so a client would have to
@@ -257,9 +249,7 @@ async def _http_exception_handler(
 
 
 @app.exception_handler(RequestValidationError)
-async def _validation_exception_handler(
-    request: Request, exc: RequestValidationError
-) -> JSONResponse:
+async def _validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Same envelope for 422s; the pydantic errors go in error_message."""
     return _error_json(request, exc, 422)
 
@@ -369,10 +359,7 @@ class ListFilesQuery(BaseModel):
 class WriteLibraryFileRequest(BaseModel):
     path: str = Field(
         ...,
-        description=(
-            "Jupyter-root-relative .py or .sage file path. Intended for helper "
-            "libraries imported or loaded by notebooks."
-        ),
+        description=("Jupyter-root-relative .py or .sage file path. Intended for helper libraries imported or loaded by notebooks."),
     )
     content: str = Field(..., description="Complete file contents to write.")
     overwrite: bool = Field(
@@ -627,18 +614,12 @@ def _validate_library_file_path(path: str) -> None:
         if any(not part.isidentifier() or keyword.iskeyword(part) for part in module_parts):
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"Python library file '{path}' must map to an importable module path. "
-                    "Use identifier path segments such as helpers.py or lib/helpers.py."
-                ),
+                detail=(f"Python library file '{path}' must map to an importable module path. Use identifier path segments such as helpers.py or lib/helpers.py."),
             )
     elif not path.endswith(".sage"):
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"Library file '{path}' must end in .py or .sage. "
-                "Use read_file/list_files for other file types."
-            ),
+            detail=(f"Library file '{path}' must end in .py or .sage. Use read_file/list_files for other file types."),
         )
 
 
@@ -666,7 +647,7 @@ async def _read_jupyter_file(path: str, file_format: Literal["text", "base64"]) 
             detail=f"Could not read file '{clean_path}': {detail[:500]}",
         )
 
-    model = response.json()
+    model = cast("dict[str, Any]", response.json())
     if model.get("type") != "file":
         raise HTTPException(
             status_code=400,
@@ -680,10 +661,7 @@ async def _read_jupyter_file(path: str, file_format: Literal["text", "base64"]) 
     if model.get("format") not in ("text", "base64"):
         raise HTTPException(
             status_code=500,
-            detail=(
-                f"Jupyter returned unsupported format {model.get('format')!r} "
-                f"for file '{clean_path}'."
-            ),
+            detail=(f"Jupyter returned unsupported format {model.get('format')!r} for file '{clean_path}'."),
         )
     return model
 
@@ -731,7 +709,7 @@ async def _write_jupyter_library_file(request: WriteLibraryFileRequest) -> dict[
             detail=f"Could not write library file '{clean_path}': {detail[:500]}",
         )
 
-    return response.json()
+    return cast("dict[str, Any]", response.json())
 
 
 def _library_import_hint(path: str) -> str:
@@ -798,27 +776,16 @@ async def _get_or_create_session_kernel(
             if kernel_name not in available:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"Kernelspec '{kernel_name}' is not installed on the "
-                        f"Jupyter server at {base_url}. "
-                        f"Available kernels: {', '.join(available) or '(none)'}."
-                    ),
+                    detail=(f"Kernelspec '{kernel_name}' is not installed on the Jupyter server at {base_url}. Available kernels: {', '.join(available) or '(none)'}."),
                 )
 
         sessions_resp = await client.get(f"{base_url}/api/sessions", headers=headers)
         sessions_resp.raise_for_status()
-        matching = [
-            session
-            for session in sessions_resp.json()
-            if session.get("path") == notebook_path
-        ]
+        matching = [session for session in sessions_resp.json() if session.get("path") == notebook_path]
         if len(matching) > 1:
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"Notebook '{notebook_path}' has {len(matching)} Jupyter sessions; "
-                    "refusing to choose a kernel ambiguously."
-                ),
+                detail=(f"Notebook '{notebook_path}' has {len(matching)} Jupyter sessions; refusing to choose a kernel ambiguously."),
             )
         if matching:
             session = matching[0]
@@ -858,10 +825,7 @@ async def _get_or_create_session_kernel(
             detail = resp.text[:500]
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"Failed to create a Jupyter session for '{notebook_path}' "
-                    f"with kernel '{kernel_name}': {resp.status_code} {detail}"
-                ),
+                detail=(f"Failed to create a Jupyter session for '{notebook_path}' with kernel '{kernel_name}': {resp.status_code} {detail}"),
             )
 
         session = resp.json()
@@ -892,11 +856,7 @@ async def _delete_unready_session(
     if deleted.status_code != 204:
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"Kernel readiness failed for '{notebook_path}', and Jupyter could not "
-                f"remove unusable session '{session_id}': "
-                f"{deleted.status_code} {deleted.text[:500]}"
-            ),
+            detail=(f"Kernel readiness failed for '{notebook_path}', and Jupyter could not remove unusable session '{session_id}': {deleted.status_code} {deleted.text[:500]}"),
         )
 
 
@@ -910,7 +870,10 @@ async def _wait_for_session_kernel_ready(
     kernel_id: str,
 ) -> dict[str, Any]:
     """Require a kernel-info reply, independent of stale REST execution state."""
-    from jupyter_kernel_client import KernelClient
+    KernelClient = cast(
+        "Any",
+        getattr(importlib.import_module("jupyter_kernel_client"), "KernelClient"),
+    )
 
     response = await client.get(
         f"{base_url}/api/kernels/{kernel_id}",
@@ -926,14 +889,10 @@ async def _wait_for_session_kernel_ready(
         )
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"Jupyter stopped reporting kernel '{kernel_id}' for "
-                f"'{notebook_path}' before readiness checks: "
-                f"{response.status_code} {response.text[:500]}"
-            ),
+            detail=(f"Jupyter stopped reporting kernel '{kernel_id}' for '{notebook_path}' before readiness checks: {response.status_code} {response.text[:500]}"),
         )
 
-    kernel_model = response.json()
+    kernel_model = cast("dict[str, Any]", response.json())
 
     def _probe_kernel_channels() -> None:
         deadline = time.monotonic() + KERNEL_READY_TIMEOUT_SECONDS
@@ -944,9 +903,7 @@ async def _wait_for_session_kernel_ready(
         )
         try:
             kernel.start(timeout=max(0.1, deadline - time.monotonic()))
-            kernel._manager.client.wait_for_ready(
-                timeout=max(0.1, deadline - time.monotonic())
-            )
+            kernel._manager.client.wait_for_ready(timeout=max(0.1, deadline - time.monotonic()))
         finally:
             kernel.stop(shutdown_kernel=False)
 
@@ -989,27 +946,16 @@ async def _replace_session_kernel(
         if kernel_name not in available:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"Kernelspec '{kernel_name}' is not installed on the "
-                    f"Jupyter server at {base_url}. "
-                    f"Available kernels: {', '.join(available) or '(none)'}."
-                ),
+                detail=(f"Kernelspec '{kernel_name}' is not installed on the Jupyter server at {base_url}. Available kernels: {', '.join(available) or '(none)'}."),
             )
 
         sessions_resp = await client.get(f"{base_url}/api/sessions", headers=headers)
         sessions_resp.raise_for_status()
-        matching = [
-            session
-            for session in sessions_resp.json()
-            if session.get("path") == notebook_path
-        ]
+        matching = [session for session in sessions_resp.json() if session.get("path") == notebook_path]
         if len(matching) > 1:
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"Notebook '{notebook_path}' has {len(matching)} Jupyter sessions; "
-                    "refusing to replace a kernel ambiguously."
-                ),
+                detail=(f"Notebook '{notebook_path}' has {len(matching)} Jupyter sessions; refusing to replace a kernel ambiguously."),
             )
 
         if matching:
@@ -1021,11 +967,7 @@ async def _replace_session_kernel(
             if deleted.status_code != 204:
                 raise HTTPException(
                     status_code=deleted.status_code,
-                    detail=(
-                        f"Could not remove old session '{old_session_id}' before "
-                        f"switching '{notebook_path}' to '{kernel_name}': "
-                        f"{deleted.text[:500]}"
-                    ),
+                    detail=(f"Could not remove old session '{old_session_id}' before switching '{notebook_path}' to '{kernel_name}': {deleted.text[:500]}"),
                 )
 
         created = await client.post(
@@ -1096,45 +1038,30 @@ async def _validate_notebook_for_mutation(notebook_id: str) -> str:
             )
         raise HTTPException(
             status_code=response.status_code,
-            detail=(
-                f"Could not validate notebook '{path}' before mutation: "
-                f"{response.text[:500]}"
-            ),
+            detail=(f"Could not validate notebook '{path}' before mutation: {response.text[:500]}"),
         )
 
     content = response.json().get("content")
     if not isinstance(content, dict):
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"Notebook '{path}' has no JSON notebook content. "
-                "Repair the notebook before retrying the mutation."
-            ),
+            detail=(f"Notebook '{path}' has no JSON notebook content. Repair the notebook before retrying the mutation."),
         )
 
     cells = content.get("cells")
     if not isinstance(cells, list):
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"Notebook '{path}' is invalid: cells must be a list; "
-                f"got {type(cells).__name__}. Repair the notebook before retrying."
-            ),
+            detail=(f"Notebook '{path}' is invalid: cells must be a list; got {type(cells).__name__}. Repair the notebook before retrying."),
         )
     for index, cell in enumerate(cells):
         if not isinstance(cell, dict):
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"Notebook '{path}' is invalid: cells[{index}] must be an object; "
-                    f"got {type(cell).__name__}. Repair the notebook before retrying."
-                ),
+                detail=(f"Notebook '{path}' is invalid: cells[{index}] must be an object; got {type(cell).__name__}. Repair the notebook before retrying."),
             )
         source = cell.get("source")
-        source_is_valid = isinstance(source, str) or (
-            isinstance(source, list)
-            and all(isinstance(line, str) for line in source)
-        )
+        source_is_valid = isinstance(source, str) or (isinstance(source, list) and all(isinstance(line, str) for line in source))
         if not source_is_valid:
             raise HTTPException(
                 status_code=409,
@@ -1178,9 +1105,7 @@ async def health() -> dict[str, Any]:
             response.raise_for_status()
             status = response.json()
         if not isinstance(status, dict) or "started" not in status:
-            raise RuntimeError(
-                f"Jupyter returned an invalid /api/status payload: {type(status).__name__}"
-            )
+            raise RuntimeError(f"Jupyter returned an invalid /api/status payload: {type(status).__name__}")
         return {"ok": True, "status": "healthy", "jupyter_url": base_url}
     except Exception as exc:
         return {
@@ -1211,9 +1136,7 @@ async def list_files(
         )
     )
     if not isinstance(result, str) or not result.strip():
-        raise RuntimeError(
-            "list_notebooks returned no result after the Jupyter filesystem scan."
-        )
+        raise RuntimeError("list_notebooks returned no result after the Jupyter filesystem scan.")
     return {"ok": True, "result": result}
 
 
@@ -1377,10 +1300,7 @@ async def read_notebook(
     notebook_id: str,
     response_format: Literal["brief", "detailed"] = Query(
         "brief",
-        description=(
-            "Use 'brief' first to locate cells without returning their full sources; "
-            "then request a bounded 'detailed' page."
-        ),
+        description=("Use 'brief' first to locate cells without returning their full sources; then request a bounded 'detailed' page."),
     ),
     start_index: int = Query(
         0,
@@ -1391,10 +1311,7 @@ async def read_notebook(
         20,
         ge=1,
         le=200,
-        description=(
-            "Maximum cells in this page. Keep detailed pages small to remain within "
-            "the Action response limit."
-        ),
+        description=("Maximum cells in this page. Keep detailed pages small to remain within the Action response limit."),
     ),
 ) -> dict[str, Any]:
     """Read one bounded page; use brief overview before detailed source pages."""
@@ -1457,9 +1374,7 @@ async def get_notebook_status(notebook_id: str) -> dict[str, Any]:
                     nbformat.validate(content)
                     validation_error = None
                 except Exception as exc:
-                    validation_error = (
-                        f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
-                    )
+                    validation_error = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
                 cells = content.get("cells")
                 persisted = {
                     "valid": validation_error is None,
@@ -1471,10 +1386,7 @@ async def get_notebook_status(notebook_id: str) -> dict[str, Any]:
         else:
             persisted = {
                 "valid": False,
-                "error": (
-                    f"Jupyter contents request failed with "
-                    f"{contents_response.status_code}: {contents_response.text[:500]}"
-                ),
+                "error": (f"Jupyter contents request failed with {contents_response.status_code}: {contents_response.text[:500]}"),
             }
 
         sessions_response = await client.get(
@@ -1484,16 +1396,9 @@ async def get_notebook_status(notebook_id: str) -> dict[str, Any]:
         if sessions_response.status_code != 200:
             raise HTTPException(
                 status_code=sessions_response.status_code,
-                detail=(
-                    "Could not inspect Jupyter sessions while building notebook "
-                    f"status: {sessions_response.text[:500]}"
-                ),
+                detail=(f"Could not inspect Jupyter sessions while building notebook status: {sessions_response.text[:500]}"),
             )
-        matching_sessions = [
-            session
-            for session in sessions_response.json()
-            if session.get("path") == path
-        ]
+        matching_sessions = [session for session in sessions_response.json() if session.get("path") == path]
 
     session = matching_sessions[0] if len(matching_sessions) == 1 else None
     kernel = session.get("kernel", {}) if session else {}
@@ -1503,19 +1408,23 @@ async def get_notebook_status(notebook_id: str) -> dict[str, Any]:
     rtc: dict[str, Any] = {
         "readable": False,
         "error": (
-            "RTC was not probed because the notebook has no unique live session."
-            if session is None
-            else "RTC was not probed because persisted notebook validation failed."
+            "RTC was not probed because the notebook has no unique live session." if session is None else "RTC was not probed because persisted notebook validation failed."
         ),
     }
     if session is not None and persisted["valid"]:
         try:
             config = get_config()
+            document_token = config.document_token or config.runtime_token
+            if document_token is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Jupyter document token is not configured.",
+                )
             async with asyncio.timeout(15):
                 async with NotebookConnection(
                     {
                         "server_url": base_url,
-                        "token": config.document_token or config.runtime_token,
+                        "token": document_token,
                         "path": path,
                     }
                 ) as notebook:
@@ -1542,16 +1451,8 @@ async def get_notebook_status(notebook_id: str) -> dict[str, Any]:
             "id": kernel.get("id"),
             "name": live_kernel_name,
             "execution_state": kernel.get("execution_state"),
-            "matches_persisted_kernelspec": (
-                live_kernel_name == persisted_kernel_name
-                if live_kernel_name is not None and persisted_kernel_name is not None
-                else None
-            ),
-            "matches_default": (
-                live_kernel_name == DEFAULT_KERNEL_NAME
-                if live_kernel_name is not None
-                else None
-            ),
+            "matches_persisted_kernelspec": (live_kernel_name == persisted_kernel_name if live_kernel_name is not None and persisted_kernel_name is not None else None),
+            "matches_default": (live_kernel_name == DEFAULT_KERNEL_NAME if live_kernel_name is not None else None),
             "default_name": DEFAULT_KERNEL_NAME,
         },
         rtc=rtc,
@@ -1895,6 +1796,10 @@ async def get_execution_status(notebook_id: str) -> dict[str, Any]:
     return _envelope(notebook_id, path, **state)
 
 
+def _default_restart_request() -> RestartNotebookRequest:
+    return RestartNotebookRequest(kernel_name=DEFAULT_KERNEL_NAME)
+
+
 # ---------------------------------------------------------------------------
 # Routes — notebook lifecycle
 # ---------------------------------------------------------------------------
@@ -1908,7 +1813,7 @@ async def get_execution_status(notebook_id: str) -> dict[str, Any]:
 )
 async def restart_notebook(
     notebook_id: str,
-    request: RestartNotebookRequest = Body(default_factory=RestartNotebookRequest),
+    request: RestartNotebookRequest = Body(default_factory=_default_restart_request),
 ) -> dict[str, Any]:
     """Replace the notebook's session kernel; SageMath is the default."""
     recovering_unresponsive = False
@@ -1944,22 +1849,14 @@ async def restart_notebook(
             await runtime.activate(notebook_id, kernel_id=kernel_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    recovery_note = (
-        " after its previous heartbeat stopped responding"
-        if recovering_unresponsive
-        else ""
-    )
+    recovery_note = " after its previous heartbeat stopped responding" if recovering_unresponsive else ""
     return _envelope(
         notebook_id,
         path,
         kernel_id=kernel_id,
         kernel_name=kernel_name,
         session_id=session_id,
-        result=(
-            f"Notebook '{notebook_id}' now has a fresh '{kernel_name}' kernel"
-            f"{recovery_note}. "
-            "Memory state and imported packages have been cleared."
-        ),
+        result=(f"Notebook '{notebook_id}' now has a fresh '{kernel_name}' kernel{recovery_note}. Memory state and imported packages have been cleared."),
     )
 
 
@@ -1974,19 +1871,12 @@ async def unuse_notebook(notebook_id: str) -> dict[str, Any]:
     if runtime.execution_is_running(notebook_id):
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"Cannot unuse notebook '{notebook_id}' while its execution is running. "
-                f"Poll /v1/notebooks/{notebook_id}/execution until it is complete."
-            ),
+            detail=(f"Cannot unuse notebook '{notebook_id}' while its execution is running. Poll /v1/notebooks/{notebook_id}/execution until it is complete."),
         )
     path = decode_notebook_id(notebook_id)
     kernel_id = runtime.notebooks.get_kernel_id(notebook_id)
     async with runtime.operation_lock(notebook_id):
-        result = await safe_notebook_operation(
-            lambda: UnuseNotebookTool().execute(
-                **_ctx(notebook_name=notebook_id)
-            )
-        )
+        result = await safe_notebook_operation(lambda: UnuseNotebookTool().execute(**_ctx(notebook_name=notebook_id)))
     runtime.pending_executions.pop(notebook_id, None)
     return _envelope(
         notebook_id,

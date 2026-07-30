@@ -3,11 +3,11 @@ name: Release
 on:
   push:
     tags:
-      - 'v*.*.*'  # Trigger condition: v0.15.2, v1.0.0, etc.
+      - 'v*.*.*' # Trigger condition: v0.15.2, v1.0.0, etc.
 
 permissions:
   contents: write
-  id-token: write  # For OIDC trusted publishing
+  id-token: write # For OIDC trusted publishing
 
 jobs:
   # Job 1: Build Python Package
@@ -20,7 +20,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.10'
+          python-version: '3.14'
 
       - name: Install dependencies
         run: |
@@ -45,7 +45,7 @@ jobs:
       name: pypi
       url: https://pypi.org/p/jupyter-mcp-server
     permissions:
-      id-token: write  # Required for OIDC
+      id-token: write # Required for OIDC
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -65,8 +65,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write  # For GHCR
-      id-token: write  # For Docker Hub OIDC (optional)
+      packages: write # For GHCR
+      id-token: write # For Docker Hub OIDC (optional)
     steps:
       - uses: actions/checkout@v7
 
@@ -110,7 +110,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0  # Fetch complete history for release creation
+          fetch-depth: 0 # Fetch complete history for release creation
 
       - name: Extract version
         id: version
