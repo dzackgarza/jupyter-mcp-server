@@ -60,11 +60,25 @@ class NotebookConnection:
             )
 
         config = get_config()
+        server_url = self.notebook_info.get("server_url", config.document_url)
+        token = self.notebook_info.get("token", config.document_token)
+        headers: dict[str, str] | None = None
+        try:
+            import requests
+            session = requests.Session()
+            session.get(f"{server_url.rstrip('/')}/tree", timeout=3)
+            xsrf = session.cookies.get("_xsrf")
+            if xsrf:
+                headers = {"Cookie": f"_xsrf={xsrf}", "X-XSRFToken": xsrf}
+        except Exception:
+            pass
+
         ws_url = get_notebook_websocket_url(
-            server_url=self.notebook_info.get("server_url", config.document_url),
-            token=self.notebook_info.get("token", config.document_token),
+            server_url=server_url,
+            token=token,
             path=self.notebook_info.get("path", config.document_id),
             provider=config.provider,
+            headers=headers,
         )
         self._notebook = NbModelClient(ws_url)
         await self._notebook.__aenter__()

@@ -564,7 +564,11 @@ async def execute_cell_thread_safe(notebook: Any, cell_index: int, kernel: Any) 
 
     with notebook._lock:
         with ycell.doc.transaction(origin=notebook._changes_origin):
-            del ycell["outputs"][:]
+            if "outputs" in ycell:
+                del ycell["outputs"][:]
+            else:
+                import pycrdt
+                ycell["outputs"] = pycrdt.Array()
             ycell["execution_count"] = None
             ycell["execution_state"] = "running"
 
