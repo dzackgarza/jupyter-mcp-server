@@ -8,7 +8,7 @@ Wants=network-online.target jupyter-assistant-api.service
 # http2 protocol are versioned rather than surviving only in an untracked dotfile.
 # Only the credentials JSON stays in ~/.cloudflared — the config references it by
 # path, so no secret enters the repo.
-ExecStart=/bin/cloudflared tunnel --config %h/gitclones/jupyter-assistant-api/dev/cloudflared/config-jupyter-assistant.yml run
+ExecStart=/bin/cloudflared tunnel --config %h/research/subrepos/jupyter-assistant-api/dev/cloudflared/config-jupyter-assistant.yml run
 Restart=always
 RestartSec=5
 
