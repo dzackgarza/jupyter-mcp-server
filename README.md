@@ -15,10 +15,13 @@ This is a thin FastAPI transport layer that replaces the MCP protocol with a sta
 ## Architecture
 
 ```
-Custom GPT → HTTPS → cloudflared tunnel → FastAPI adapter → existing tool classes → JupyterLab
+Custom GPT  → HTTPS → cloudflared tunnel → FastAPI adapter (REST)   → existing tool classes → JupyterLab
+ChatGPT app → HTTPS → cloudflared tunnel → /mcp (streamable HTTP) → existing tool classes → JupyterLab
 ```
 
 - **Adapter**: Uvicorn on `127.0.0.1:4042`, `workers=1` (required by `asyncio.Lock` around `NotebookManager`)
+
+- **MCP server**: `jupyter-mcp-server start --transport streamable-http` on `127.0.0.1:4043`, public at `https://jupyter-assistant.dzackgarza.com/mcp`. ChatGPT apps connect only to MCP servers; add this URL as an app with no authentication.
 
 - **Public URL**: `https://jupyter-assistant.dzackgarza.com`
 
@@ -315,22 +318,23 @@ uvicorn jupyter_mcp_server.assistant_api:app --host 127.0.0.1 --port 4042 --work
 
 ### systemd user services (recommended)
 
-Both long-running pieces — the adapter and the Cloudflare tunnel — are vendored as systemd user units in [`dev/systemd/`](dev/systemd).
+The long-running pieces — the REST adapter, the MCP server and the Cloudflare tunnel — are vendored as systemd user units in [`dev/systemd/`](dev/systemd).
 Install them by absolute path so systemd symlinks the repo copies and the repo stays the single source of truth:
 
 ```bash
 systemctl --user enable --now \
   "$PWD/dev/systemd/jupyter-assistant-api.service" \
+  "$PWD/dev/systemd/jupyter-mcp.service" \
   "$PWD/dev/systemd/jupyter-assistant-tunnel.service"
 
-systemctl --user is-active jupyter-assistant-api jupyter-assistant-tunnel
+systemctl --user is-active jupyter-assistant-api jupyter-mcp jupyter-assistant-tunnel
 ```
 
 After editing a vendored unit, `systemctl --user daemon-reload && systemctl --user restart <unit>`.
 
 The units hardcode `/home/dzack` paths — this deployment is single-machine by design.
 Adjust the paths when installing elsewhere.
-`jupyter-assistant-tunnel` reads `~/.cloudflared/config-jupyter-assistant.yml`, which is **not** vendored because it names a credentials file; its ingress must point at `127.0.0.1:4042`. If that host:port disagrees with the adapter, the public hostname serves Cloudflare **error 502**; if the tunnel is not running at all, **error 1033**.
+`jupyter-assistant-tunnel` reads the vendored [`dev/cloudflared/config-jupyter-assistant.yml`](dev/cloudflared/config-jupyter-assistant.yml). It routes `^/mcp` to `127.0.0.1:4043` and every other path to `127.0.0.1:4042`. If a host:port disagrees with the adapter, the public hostname serves Cloudflare **error 502**; if the tunnel is not running at all, **error 1033**.
 
 ### Verify
 
@@ -501,58 +505,10 @@ cloudflared tunnel create jupyter-assistant
 cloudflared tunnel route dns jupyter-assistant jupyter-assistant.dzackgarza.com
 ```
 
-### 5. Create the config file
+### 5. Run the tunnel
 
-Write `~/.cloudflared/config-jupyter-assistant.yml`:
-
-```yaml
-tunnel: f12f0463-0152-489d-a028-cb7ae016f188
-credentials-file: /home/dzack/.cloudflared/f12f0463-0152-489d-a028-cb7ae016f188.json
-
-ingress:
-  - hostname: jupyter-assistant.dzackgarza.com
-    service: http://127.0.0.1:4042
-  - service: http_status:404
-```
-
-The last rule is a catch-all that returns 404 for unmatched hostnames — required by cloudflared.
-
-### 6. Run the tunnel
-
-```bash
-# Foreground (for testing):
-cloudflared tunnel --config ~/.cloudflared/config-jupyter-assistant.yml run
-
-# Background (detached):
-nohup cloudflared tunnel --config ~/.cloudflared/config-jupyter-assistant.yml run &
-```
-
-### 7. (Optional) Set up as a systemd user service
-
-Create `~/.config/systemd/user/cloudflared-jupyter-assistant.service`:
-
-```ini
-[Unit]
-Description=Cloudflare Tunnel - Jupyter Assistant API
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/cloudflared tunnel --config /home/dzack/.cloudflared/config-jupyter-assistant.yml run
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-Then:
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now cloudflared-jupyter-assistant.service
-systemctl --user status cloudflared-jupyter-assistant.service
-```
+The ingress config is [`dev/cloudflared/config-jupyter-assistant.yml`](dev/cloudflared/config-jupyter-assistant.yml), run by `dev/systemd/jupyter-assistant-tunnel.service` (see "systemd user services" above).
+The `/mcp` rule rewrites the Host header to `127.0.0.1:4043`, because the MCP SDK rejects a non-loopback Host header when the server binds loopback.
 
 ### Verification
 

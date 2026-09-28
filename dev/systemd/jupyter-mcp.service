@@ -1,0 +1,17 @@
+[Unit]
+Description=Jupyter MCP server (streamable HTTP for ChatGPT apps)
+After=jupyter-sagemath.service
+Wants=jupyter-sagemath.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/dzack/research/subrepos/jupyter-assistant-api
+# Loopback only; jupyter-assistant-tunnel.service routes /mcp on
+# jupyter-assistant.dzackgarza.com here. No MCP auth, like the REST adapter on 4042.
+ExecStart=/bin/direnv exec /home/dzack/research/subrepos/jupyter-assistant-api /home/dzack/.local/bin/uv run jupyter-mcp-server start --transport streamable-http --port 4043 --runtime-url http://127.0.0.1:8888 --document-url http://127.0.0.1:8888 --start-new-runtime False --insecure-mcp-noauth
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/home/dzack
+
+[Install]
+WantedBy=default.target
