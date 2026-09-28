@@ -248,7 +248,7 @@ def do_start(
     if transport == "stdio":
         mcp.run(transport="stdio")
     elif transport == "streamable-http":
-        uvicorn.run(mcp.streamable_http_app, host="0.0.0.0", port=port)  # noqa: S104
+        uvicorn.run(mcp.streamable_http_app, host="127.0.0.1", port=port)
     else:
         raise Exception("Transport should be `stdio` or `streamable-http`.")
 

@@ -16,12 +16,12 @@ This is a thin FastAPI transport layer that replaces the MCP protocol with a sta
 
 ```
 Custom GPT  → HTTPS → cloudflared tunnel → FastAPI adapter (REST)   → existing tool classes → JupyterLab
-ChatGPT app → HTTPS → cloudflared tunnel → /mcp (streamable HTTP) → existing tool classes → JupyterLab
+ChatGPT app → OpenAI Secure MCP Tunnel ← tunnel-client → /mcp (streamable HTTP) → existing tool classes → JupyterLab
 ```
 
 - **Adapter**: Uvicorn on `127.0.0.1:4042`, `workers=1` (required by `asyncio.Lock` around `NotebookManager`)
 
-- **MCP server**: `jupyter-mcp-server start --transport streamable-http` on `127.0.0.1:4043`, public at `https://jupyter-assistant.dzackgarza.com/mcp`. ChatGPT apps connect only to MCP servers; add this URL as an app with no authentication.
+- **MCP server**: `jupyter-mcp-server start --transport streamable-http` on `127.0.0.1:4043`, with no public route. ChatGPT reaches it only through the OpenAI Secure MCP Tunnel `tunnel_6a63f5b32dc08191b44ffcc1d1941e07`: [`tunnel-client`](https://github.com/openai/tunnel-client) long-polls `api.openai.com` and forwards each request to the loopback server, so it needs no inbound port. In ChatGPT, create the app with Connection: Tunnel and that tunnel ID, with no authentication.
 
 - **Public URL**: `https://jupyter-assistant.dzackgarza.com`
 
@@ -318,23 +318,26 @@ uvicorn jupyter_mcp_server.assistant_api:app --host 127.0.0.1 --port 4042 --work
 
 ### systemd user services (recommended)
 
-The long-running pieces — the REST adapter, the MCP server and the Cloudflare tunnel — are vendored as systemd user units in [`dev/systemd/`](dev/systemd).
+The long-running pieces — the REST adapter, the MCP server, the Cloudflare tunnel for the adapter and the OpenAI tunnel for the MCP server — are vendored as systemd user units in [`dev/systemd/`](dev/systemd).
 Install them by absolute path so systemd symlinks the repo copies and the repo stays the single source of truth:
 
 ```bash
 systemctl --user enable --now \
   "$PWD/dev/systemd/jupyter-assistant-api.service" \
   "$PWD/dev/systemd/jupyter-mcp.service" \
-  "$PWD/dev/systemd/jupyter-assistant-tunnel.service"
+  "$PWD/dev/systemd/jupyter-assistant-tunnel.service" \
+  "$PWD/dev/systemd/jupyter-mcp-openai-tunnel.service"
 
-systemctl --user is-active jupyter-assistant-api jupyter-mcp jupyter-assistant-tunnel
+systemctl --user is-active jupyter-assistant-api jupyter-mcp jupyter-assistant-tunnel jupyter-mcp-openai-tunnel
 ```
+
+`jupyter-mcp-openai-tunnel` runs `~/.local/bin/tunnel-client` (from the [releases](https://github.com/openai/tunnel-client/releases/latest)) with `CONTROL_PLANE_API_KEY` from `~/.envrc`. Its health and web UI listener is `http://127.0.0.1:4044/ui`; `curl 127.0.0.1:4044/readyz` reports readiness.
 
 After editing a vendored unit, `systemctl --user daemon-reload && systemctl --user restart <unit>`.
 
 The units hardcode `/home/dzack` paths — this deployment is single-machine by design.
 Adjust the paths when installing elsewhere.
-`jupyter-assistant-tunnel` reads the vendored [`dev/cloudflared/config-jupyter-assistant.yml`](dev/cloudflared/config-jupyter-assistant.yml). It routes `^/mcp` to `127.0.0.1:4043` and every other path to `127.0.0.1:4042`. If a host:port disagrees with the adapter, the public hostname serves Cloudflare **error 502**; if the tunnel is not running at all, **error 1033**.
+`jupyter-assistant-tunnel` reads the vendored [`dev/cloudflared/config-jupyter-assistant.yml`](dev/cloudflared/config-jupyter-assistant.yml). It routes every path to `127.0.0.1:4042`. If a host:port disagrees with the adapter, the public hostname serves Cloudflare **error 502**; if the tunnel is not running at all, **error 1033**.
 
 ### Verify
 
@@ -508,7 +511,6 @@ cloudflared tunnel route dns jupyter-assistant jupyter-assistant.dzackgarza.com
 ### 5. Run the tunnel
 
 The ingress config is [`dev/cloudflared/config-jupyter-assistant.yml`](dev/cloudflared/config-jupyter-assistant.yml), run by `dev/systemd/jupyter-assistant-tunnel.service` (see "systemd user services" above).
-The `/mcp` rule rewrites the Host header to `127.0.0.1:4043`, because the MCP SDK rejects a non-loopback Host header when the server binds loopback.
 
 ### Verification
 

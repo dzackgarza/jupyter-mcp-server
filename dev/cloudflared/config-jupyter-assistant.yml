@@ -10,16 +10,11 @@ credentials-file: /home/dzack/.cloudflared/f12f0463-0152-489d-a028-cb7ae016f188.
 # crash-loops.
 edge-ip-version: "4"
 protocol: http2
-# Ports must match main() in jupyter_mcp_server/assistant_api.py (4042, REST for GPT
-# Actions) and dev/systemd/jupyter-mcp.service (4043, MCP for ChatGPT apps). The
-# path rule must precede the hostname catch-all. Neither service has authentication,
-# so both bind loopback only and this tunnel is the sole public path to them.
 ingress:
-  - hostname: jupyter-assistant.dzackgarza.com
-    path: ^/mcp
-    service: http://127.0.0.1:4043
-    originRequest:
-      httpHostHeader: 127.0.0.1:4043 # the MCP SDK rejects non-loopback Host headers (DNS-rebinding guard)
+  # Port must match main() in jupyter_mcp_server/assistant_api.py (4042, REST adapter).
+  # The adapter has no authentication, so it binds loopback only and this tunnel is
+  # the sole public path to it. The MCP server (4043) has no public route: ChatGPT
+  # reaches it through jupyter-mcp-openai-tunnel.service.
   - hostname: jupyter-assistant.dzackgarza.com
     service: http://127.0.0.1:4042
   - service: http_status:404

@@ -185,11 +185,12 @@ class FastMCPWithCORS(FastMCP):
         return app
 
 
-# The streamable-HTTP app listens on 0.0.0.0 (utils.py) and is served through a
-# public tunnel. FastMCP turns on loopback-only Host and Origin checks when its
-# host setting is a loopback address, so the setting names the real listener.
+# The streamable-HTTP app listens on loopback (utils.py); an OpenAI Secure MCP
+# Tunnel client forwards ChatGPT's requests to it. FastMCP turns on loopback-only
+# Host and Origin checks when its host setting is a loopback address, so the
+# setting names the real listener.
 mcp = FastMCPWithCORS(
-    name="Jupyter MCP Server", host="0.0.0.0", json_response=False, stateless_http=True  # noqa: S104
+    name="Jupyter MCP Server", host="127.0.0.1", json_response=False, stateless_http=True
 )
 notebook_manager = NotebookManager()
 server_context = ServerContext.get_instance()

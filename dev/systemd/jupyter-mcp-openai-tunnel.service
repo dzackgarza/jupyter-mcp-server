@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenAI Secure MCP Tunnel for the Jupyter MCP server
+After=network-online.target jupyter-mcp.service
+Wants=network-online.target jupyter-mcp.service
+
+[Service]
+Type=simple
+# tunnel-client (github.com/openai/tunnel-client) long-polls api.openai.com for
+# the MCP requests that ChatGPT sends to this tunnel and forwards each one to the
+# loopback MCP server. It needs only outbound HTTPS. CONTROL_PLANE_API_KEY comes
+# from ~/.envrc; the health and /ui listener is loopback port 4044.
+ExecStart=/bin/direnv exec /home/dzack /home/dzack/.local/bin/tunnel-client run --control-plane.tunnel-id tunnel_6a63f5b32dc08191b44ffcc1d1941e07 --mcp.server-url http://127.0.0.1:4043/mcp --health.listen-addr 127.0.0.1:4044
+Restart=always
+RestartSec=5
+Environment=HOME=/home/dzack
+
+[Install]
+WantedBy=default.target
