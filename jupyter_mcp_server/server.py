@@ -185,7 +185,12 @@ class FastMCPWithCORS(FastMCP):
         return app
 
 
-mcp = FastMCPWithCORS(name="Jupyter MCP Server", json_response=False, stateless_http=True)
+# The streamable-HTTP app listens on 0.0.0.0 (utils.py) and is served through a
+# public tunnel. FastMCP turns on loopback-only Host and Origin checks when its
+# host setting is a loopback address, so the setting names the real listener.
+mcp = FastMCPWithCORS(
+    name="Jupyter MCP Server", host="0.0.0.0", json_response=False, stateless_http=True  # noqa: S104
+)
 notebook_manager = NotebookManager()
 server_context = ServerContext.get_instance()
 extension_manager = get_extension_manager()
