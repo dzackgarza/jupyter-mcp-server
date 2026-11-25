@@ -1,7 +1,6 @@
 {
   "argv": [
-    "sage",
-    "--python",
+    "SAGE_PYTHON",
     "-m",
     "sage.repl.ipython_kernel",
     "-f",

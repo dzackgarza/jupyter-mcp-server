@@ -555,7 +555,11 @@ Returning 200 is what makes failures readable to the only thing reading them.
 
 ### Sage kernel
 
-`.envrc` prepends `dev/jupyter` to `JUPYTER_PATH`, which shadows the system `sagemath` kernelspec with one whose `argv` uses `sage --python`. The system spec uses a bare `python`, resolved from the launching process's PATH, so a Jupyter server started under this project's `.venv` gets an interpreter that cannot `import sage`; the kernel then crash-loops and the websocket handshake fails with an opaque 500. Run `direnv allow` once after cloning.
+A Jupyter server started from this project's virtual environment must not use its own Python to launch Sage. Jupyter Client rewrites a bare `python` in a kernelspec to the server's interpreter, which may not have Sage installed. Sage 10.10 and later also no longer support `sage --python`.
+
+For development with Sage, run `direnv allow` in the checkout (or `source .envrc` in a shell). The activation generates an ignored `.jupyter/dev-kernels/kernels/sagemath/kernel.json` with the absolute interpreter reported by `sage -c 'import sys; print(sys.executable)'`. It validates that this interpreter can import the Sage kernel and prepends the generated data directory to `JUPYTER_PATH`. The server and its kernel must share a filesystem namespace; use the shared math container when Sage is installed only inside that container. For a custom native installation, set `SAGE_PYTHON` to the absolute Sage Python executable before activation. Re-activate after moving or replacing Sage.
+
+The Sage-specific readiness regression is enabled by activation (`JUPYTER_MCP_TEST_SAGE=1`). Run `python -m pytest tests/test_assistant_kernel_readiness.py` from the project environment after activating; the fixture launches JupyterLab, opens a named `sagemath` session, and evaluates an exact rational. Without activation the Python readiness test still runs, while the Sage-specific case is skipped.
 
 ## Deployment (systemd + Cloudflare tunnel)
 
